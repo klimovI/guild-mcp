@@ -28,18 +28,6 @@ export function findAttachment(msg: Message<true>, attachmentId: string): Attach
   );
 }
 
-// Ищем вложение, при промахе один раз перечитав сообщение из REST (force): холодный/конкурентный
-// кэш discord.js порой отдаёт объект без полностью загруженных messageSnapshots, и вложение форварда
-// «пропадает». Обычный путь остаётся на кэше — лишний REST только при промахе.
-export async function resolveAttachment(
-  fetchMsg: (force: boolean) => Promise<Message<true>>,
-  attachmentId: string,
-): Promise<Attachment | undefined> {
-  const cached = findAttachment(await fetchMsg(false), attachmentId);
-  if (cached) return cached;
-  return findAttachment(await fetchMsg(true), attachmentId);
-}
-
 // get_attachment — отдать САМО вложение, а не только ссылку: картинку как image-контент (Claude
 // её видит), текстовый файл как текст. Гейтинг через сообщение (channelId+messageId), НЕ через
 // голый URL — иначе подписанный CDN-URL обходил бы проверку доступа.
@@ -63,17 +51,16 @@ export function registerGetAttachment(server: McpServer, deps: ToolDeps): void {
       const caller = callerFromAuth(extra.authInfo);
       let attachment;
       try {
-        attachment = await resolveAttachment(
-          (force) => fetchMessage(deps.discord, caller.userId, args.channelId, args.messageId, force),
-          args.attachmentId,
-        );
+        const msg = await fetchMessage(deps.discord, caller.userId, args.channelId, args.messageId);
+        attachment = findAttachment(msg, args.attachmentId);
       } catch (e) {
         return fetchErrorResult(e, `Failed to fetch message ${args.messageId} in channel ${args.channelId}`);
       }
       if (!attachment) {
         return errorResult(
           `Attachment ${args.attachmentId} not found in message ${args.messageId}. ` +
-            'Re-fetch get_message for a current attachmentId (forwarded ids can change).',
+            'Re-fetch get_message and use an attachmentId from its attachments[] or ' +
+            "forwardedMessages[].attachments[] — a forward has its own attachment ids, not the original message's.",
         );
       }
 

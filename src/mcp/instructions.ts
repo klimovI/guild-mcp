@@ -4,7 +4,7 @@
 // and per-tool input contracts live in each tool's description. Keep the field list in sync with
 // shared.ts (message card) and search.ts (lighter search hit).
 
-export const SERVER_INSTRUCTIONS = `Read-only access to Discord, gated by your Discord roles: message and channel tools expose only the channels you may see; member tools only the servers you share with this bot. Everything else is refused.
+export const SERVER_INSTRUCTIONS = `Read-only Discord access, gated by your roles: message/channel tools expose only channels you can see; member tools only servers you share with the bot. Else refused.
 
 Message-card fields (get_messages, get_message, get_pinned; search_messages returns a lighter subset):
 - content: raw text (mentions as <@id>). cleanContent: mentions/channels/emoji resolved — prefer for display.

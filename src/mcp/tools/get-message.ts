@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { callerFromAuth } from '../../auth/session.js';
 import { fetchMessage } from '../../discord/messages.js';
 import type { ToolDeps } from '../server.js';
-import { fetchErrorResult, formatMessageFull, jsonResult, makeChannelGate } from './shared.js';
+import { fetchErrorResult, formatMessageFull, jsonResult } from './shared.js';
 
 // get_message — одно сообщение по id, полная карточка из Discord API. Для «разверни хит search».
 // Тот же гейтинг по каналу, что и у get_messages: отказ, если вызвавший канал не видит.
@@ -27,7 +27,6 @@ export function registerGetMessage(server: McpServer, deps: ToolDeps): void {
       } catch (e) {
         return fetchErrorResult(e, `Failed to fetch message ${args.messageId} in channel ${args.channelId}`);
       }
-      const gate = makeChannelGate(deps, caller.userId);
       const resolveReference = async (channelId: string, messageId: string) => {
         try {
           return await fetchMessage(deps.discord, caller.userId, channelId, messageId);
@@ -35,7 +34,7 @@ export function registerGetMessage(server: McpServer, deps: ToolDeps): void {
           return null; // недоступно/удалено/нет прав на target — оставляем только ids
         }
       };
-      return jsonResult(await formatMessageFull(msg, gate, resolveReference));
+      return jsonResult(await formatMessageFull(msg, resolveReference));
     },
   );
 }

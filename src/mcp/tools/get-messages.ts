@@ -3,14 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { callerFromAuth } from '../../auth/session.js';
 import { fetchMessages } from '../../discord/messages.js';
 import type { ToolDeps } from '../server.js';
-import {
-  errorResult,
-  fetchErrorResult,
-  formatCompactList,
-  jsonResult,
-  makeChannelGate,
-  toSnowflake,
-} from './shared.js';
+import { errorResult, fetchErrorResult, formatCompactList, jsonResult, toSnowflake } from './shared.js';
 
 // get_messages — история канала (newest first), полное содержимое, живое чтение из Discord API.
 // Отказ, если вызвавший канал не видит.
@@ -48,8 +41,7 @@ export function registerGetMessages(server: McpServer, deps: ToolDeps): void {
       } catch (e) {
         return fetchErrorResult(e, 'Failed to fetch messages');
       }
-      const gate = makeChannelGate(deps, caller.userId);
-      return jsonResult(await formatCompactList(messages, gate));
+      return jsonResult(formatCompactList(messages));
     },
   );
 }

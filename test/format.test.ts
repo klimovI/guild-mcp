@@ -5,8 +5,9 @@ import { fetchMessage } from '../src/discord/messages.js';
 import { formatMessageCompact, formatMessageFull } from '../src/mcp/tools/shared.js';
 import { fakeChannel, fakeClient, perms, VIEW } from './helpers.js';
 
-// Покрывает security-критичный гейтинг в shared.ts: имена/содержимое каналов, недоступных
-// вызвавшему (mentions/thread/reply-preview), НЕ должны протечь. gate управляем из теста.
+// Покрывает security-критичный гейтинг в shared.ts: содержимое процитированного (reply-preview)
+// НЕ должно протечь, если вызвавший не может прочитать то сообщение. Имена упомянутых каналов и
+// тред НЕ гейтим — Discord показывает их всем зрителям сообщения.
 
 type MsgOpts = {
   cleanContent?: string;
@@ -53,38 +54,19 @@ function fakeMessage(opts: MsgOpts = {}): Message<true> {
   } as unknown as Message<true>;
 }
 
-const ALLOW = async () => true;
-const DENY = async () => false;
-
-describe('formatMessageCompact — гейтинг упоминаний каналов', () => {
-  const msg = () => fakeMessage({ cleanContent: 'see #secret now', mentionChannels: [{ id: 'c9', name: 'secret' }] });
-
-  it('канал недоступен вызвавшему → имя скрыто (null), id остаётся, #name→<#id> в cleanContent', async () => {
-    const out = (await formatMessageCompact(msg(), DENY)) as { mentions: { channels: { id: string; name: string | null }[] }; cleanContent: string };
+describe('formatMessageCompact — упоминания каналов и тред (как Discord: имя видно всем)', () => {
+  it('имя канала и cleanContent отдаются как есть', () => {
+    const msg = fakeMessage({ cleanContent: 'see #secret now', mentionChannels: [{ id: 'c9', name: 'secret' }] });
+    const out = formatMessageCompact(msg) as { mentions: { channels: { id: string; name: string | null }[] }; cleanContent: string };
     assert.equal(out.mentions.channels[0].id, 'c9');
-    assert.equal(out.mentions.channels[0].name, null);
-    assert.equal(out.cleanContent, 'see <#c9> now');
-  });
-
-  it('канал доступен → имя и cleanContent как есть', async () => {
-    const out = (await formatMessageCompact(msg(), ALLOW)) as { mentions: { channels: { name: string | null }[] }; cleanContent: string };
     assert.equal(out.mentions.channels[0].name, 'secret');
     assert.equal(out.cleanContent, 'see #secret now');
   });
-});
 
-describe('formatMessageCompact — гейтинг имени треда', () => {
-  const msg = () => fakeMessage({ thread: { id: 't1', name: 'private-thread' } });
-
-  it('тред недоступен → threadName null, но threadId остаётся', async () => {
-    const out = (await formatMessageCompact(msg(), DENY)) as { threadName: string | null; threadId: string | null };
-    assert.equal(out.threadName, null);
+  it('имя треда (msg.thread — всегда публичный) отдаётся как есть', () => {
+    const out = formatMessageCompact(fakeMessage({ thread: { id: 't1', name: 'my-thread' } })) as { threadName: string | null; threadId: string | null };
+    assert.equal(out.threadName, 'my-thread');
     assert.equal(out.threadId, 't1');
-  });
-
-  it('тред доступен → threadName виден', async () => {
-    const out = (await formatMessageCompact(msg(), ALLOW)) as { threadName: string | null };
-    assert.equal(out.threadName, 'private-thread');
   });
 });
 
@@ -100,7 +82,7 @@ describe('formatMessageFull — гейтинг превью процитиров
   const NO_ACCESS = async () => null;
 
   it('resolver вернул null (нет доступа к target) → только ids, без author/content', async () => {
-    const out = (await formatMessageFull(msg(), ALLOW, NO_ACCESS)) as { reference: Record<string, unknown> };
+    const out = (await formatMessageFull(msg(), NO_ACCESS)) as { reference: Record<string, unknown> };
     assert.equal(out.reference.messageId, 'm2');
     assert.equal(out.reference.channelId, 'cX');
     assert.equal(out.reference.author, undefined);
@@ -108,7 +90,7 @@ describe('formatMessageFull — гейтинг превью процитиров
   });
 
   it('resolver вернул target → добавляется превью (author + content)', async () => {
-    const out = (await formatMessageFull(msg(), ALLOW, RESOLVE_TARGET)) as { reference: Record<string, unknown> };
+    const out = (await formatMessageFull(msg(), RESOLVE_TARGET)) as { reference: Record<string, unknown> };
     assert.equal(out.reference.author, 'Ann');
     assert.equal(out.reference.content, 'quoted text');
   });
@@ -128,7 +110,7 @@ describe('formatMessageFull — reply-превью не обходит ReadMessa
       }
     };
     const msg = fakeMessage({ reference: { messageId: 'm2', channelId: 'cX', guildId: 'g1', type: 0 } });
-    const out = (await formatMessageFull(msg, ALLOW, resolveReference)) as { reference: Record<string, unknown> };
+    const out = (await formatMessageFull(msg, resolveReference)) as { reference: Record<string, unknown> };
     assert.equal(out.reference.messageId, 'm2');
     assert.equal(out.reference.author, undefined);
     assert.equal(out.reference.content, undefined);

@@ -33,17 +33,15 @@ export interface FetchMessagesOptions {
   around?: string;
 }
 
-// Одно сообщение по id (get_message и get_attachment). force=true минует кэш discord.js и читает
-// из REST — нужно, когда закэшированный объект пришёл без полностью загруженных messageSnapshots.
+// Одно сообщение по id (get_message и get_attachment).
 export async function fetchMessage(
   client: Client,
   userId: string,
   channelId: string,
   messageId: string,
-  force = false,
 ): Promise<Message<true>> {
   const channel = await viewableChannel(client, userId, channelId);
-  const msg = await channel.messages.fetch(force ? { message: messageId, force: true } : messageId);
+  const msg = await channel.messages.fetch(messageId);
   if (!msg.inGuild()) throw new MessageAccessError(`Channel ${channelId} is not a readable text channel.`);
   return msg;
 }

@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { callerFromAuth } from '../../auth/session.js';
 import { fetchPinned } from '../../discord/messages.js';
 import type { ToolDeps } from '../server.js';
-import { fetchErrorResult, formatCompactList, jsonResult, makeChannelGate } from './shared.js';
+import { fetchErrorResult, formatCompactList, jsonResult } from './shared.js';
 
 // get_pinned — закреплённые сообщения канала (прослойка к GET /channels/{id}/pins).
 // Тот же гейтинг по видимости канала, что и у get_messages.
@@ -24,8 +24,7 @@ export function registerGetPinned(server: McpServer, deps: ToolDeps): void {
       } catch (e) {
         return fetchErrorResult(e, 'Failed to fetch pinned messages');
       }
-      const gate = makeChannelGate(deps, caller.userId);
-      return jsonResult(await formatCompactList(pinned, gate));
+      return jsonResult(formatCompactList(pinned));
     },
   );
 }

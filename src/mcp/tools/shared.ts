@@ -9,24 +9,6 @@ import {
   StickerFormatType,
 } from 'discord.js';
 import { MessageAccessError } from '../../discord/messages.js';
-import { canUserViewChannel } from '../../discord/permissions.js';
-import type { ToolDeps } from '../server.js';
-
-// Гейт видимости каналов, упомянутых В сообщении (mentions/thread/reference): Discord отдаёт боту
-// больше метаданных, чем видит вызвавший. Мемоизируем per-request — один канал не проверяем дважды.
-export type ChannelGate = (channelId: string) => Promise<boolean>;
-
-export function makeChannelGate(deps: ToolDeps, userId: string): ChannelGate {
-  const cache = new Map<string, Promise<boolean>>();
-  return (channelId) => {
-    let p = cache.get(channelId);
-    if (!p) {
-      p = canUserViewChannel(deps.discord, userId, channelId);
-      cache.set(channelId, p);
-    }
-    return p;
-  };
-}
 
 // before/after/around у get_messages и min_id/max_id у search принимаем в двух формах:
 // ISO 8601-время ЛИБО сырой snowflake message id. Discord ждёт snowflake — ISO минтим по timestamp.
@@ -43,25 +25,15 @@ function truncate(s: string | null, n: number): string | null {
   return s.length > n ? `${s.slice(0, n)}…` : s;
 }
 
-// Поля, одинаковые для компактного (get_messages) и полного (get_message) вида.
-// Async: имена/содержимое каналов, недоступных вызвавшему, скрываем через gate.
-async function base(msg: Message<true>, gate: ChannelGate): Promise<Record<string, unknown>> {
-  // Имя канала-упоминания — только если вызвавший его видит; иначе null (id остаётся).
-  const channels = await Promise.all(
-    [...msg.mentions.channels.values()].map(async (c) => ({
-      id: c.id,
-      name: 'name' in c && (await gate(c.id)) ? c.name : null,
-    })),
-  );
-  // cleanContent резолвит <#id> в #name — для недоступных вызвавшему каналов возвращаем <#id>.
-  // Замена fail-safe: при коллизии имён скорее перепрячет лишнее, чем протечёт.
-  let cleanContent = msg.cleanContent;
-  for (const c of msg.mentions.channels.values()) {
-    const name = 'name' in c ? c.name : null;
-    if (name && !(await gate(c.id))) cleanContent = cleanContent.split(`#${name}`).join(`<#${c.id}>`);
-  }
-  // threadName — только если вызвавший тред видит (существенно для приватных тредов).
-  const threadName = msg.thread && (await gate(msg.thread.id)) ? msg.thread.name : null;
+// Поля, одинаковые для компактного (get_messages) и полного (get_message) вида. Имена упомянутых
+// каналов и тред отдаём как есть: Discord показывает их всем зрителям сообщения (msg.thread бывает
+// только у публичного треда, видимого любому, кто видит канал; доступ проверяется лишь при переходе).
+function base(msg: Message<true>): Record<string, unknown> {
+  const channels = [...msg.mentions.channels.values()].map((c) => ({
+    id: c.id,
+    name: 'name' in c ? c.name : null,
+  }));
+  const threadName = msg.thread?.name ?? null;
   return {
     id: msg.id,
     channelId: msg.channelId,
@@ -77,7 +49,7 @@ async function base(msg: Message<true>, gate: ChannelGate): Promise<Record<strin
       webhookId: msg.webhookId ?? null,
     },
     content: msg.content,
-    cleanContent, // mentions/каналы/эмодзи резолвнуты в читаемый вид (недоступные каналы скрыты)
+    cleanContent: msg.cleanContent, // mentions/каналы/эмодзи резолвнуты в читаемый вид
     createdAt: new Date(msg.createdTimestamp).toISOString(),
     editedAt: msg.editedTimestamp ? new Date(msg.editedTimestamp).toISOString() : null,
     type: MessageType[msg.type] ?? msg.type,
@@ -238,24 +210,16 @@ function forwardsFull(msg: Message<true>): Record<string, unknown>[] {
   }));
 }
 
-// Список компактных карточек (get_messages/get_pinned): только guild-сообщения, гейтинг каналов.
-export function formatCompactList(
-  messages: Iterable<Message>,
-  gate: ChannelGate,
-): Promise<Record<string, unknown>[]> {
-  return Promise.all(
-    [...messages].filter((m): m is Message<true> => m.inGuild()).map((m) => formatMessageCompact(m, gate)),
-  );
+// Список компактных карточек (get_messages/get_pinned): только guild-сообщения.
+export function formatCompactList(messages: Iterable<Message>): Record<string, unknown>[] {
+  return [...messages].filter((m): m is Message<true> => m.inGuild()).map(formatMessageCompact);
 }
 
 // get_messages — список истории: эмбеды/пересланное/опрос сводкой (иначе payload раздувается),
 // reply — только ids (без доп-запроса за процитированным).
-export async function formatMessageCompact(
-  msg: Message<true>,
-  gate: ChannelGate,
-): Promise<Record<string, unknown>> {
+export function formatMessageCompact(msg: Message<true>): Record<string, unknown> {
   return {
-    ...(await base(msg, gate)),
+    ...base(msg),
     embeds: msg.embeds.map(embedCompact),
     reference: reference(msg),
     poll: pollSummary(msg),
@@ -271,7 +235,6 @@ export type ReferenceResolver = (channelId: string, messageId: string) => Promis
 // содержимое форвардов, и превью процитированного.
 export async function formatMessageFull(
   msg: Message<true>,
-  gate: ChannelGate,
   resolveReference: ReferenceResolver,
 ): Promise<Record<string, unknown>> {
   let ref = reference(msg);
@@ -289,7 +252,7 @@ export async function formatMessageFull(
     }
   }
   return {
-    ...(await base(msg, gate)),
+    ...base(msg),
     embeds: msg.embeds.map(embedFull),
     reference: ref,
     poll: pollFull(msg),

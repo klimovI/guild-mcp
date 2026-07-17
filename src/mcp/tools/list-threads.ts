@@ -1,4 +1,4 @@
-import { type AnyThreadChannel, PermissionFlagsBits } from 'discord.js';
+import type { AnyThreadChannel } from 'discord.js';
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { callerFromAuth } from '../../auth/session.js';
@@ -29,19 +29,18 @@ function threadMeta(t: AnyThreadChannel): Record<string, unknown> {
 
 // list_threads — треды (прослойка к thread-эндпоинтам Discord). Пагинация повторяет нативную
 // модель архивных тредов: before (archive timestamp) + limit → { threads, hasMore }.
-// С channelId: первая страница (before пуст) = активные + private-archived (best-effort) + первая
-// страница public-archived; далее (before задан) — только следующая страница public-archived.
+// С channelId: первая страница (before пуст) = активные + первая страница public-archived;
+// далее (before задан) — только следующая страница public-archived.
 // Без channelId: активные треды по обслуживаемым гильдиям. Только видимые вызвавшему.
 export function registerListThreads(server: McpServer, deps: ToolDeps): void {
   server.registerTool(
     'list_threads',
     {
       description:
-        'Threads you may see. With channelId: that channel/forum\'s active + archived threads. To ' +
-        'page older archived threads, pass the oldest returned archivedAt back as before; hasMore ' +
-        'signals more remain (limit ≤100, default 50). Private archived threads may appear only on ' +
-        'the first page. Without channelId: active threads across all your servers. Returns ' +
-        '{ threads, hasMore }. Read one with get_messages(channelId=thread id).',
+        'Threads you may see. With channelId: that channel/forum\'s active + public archived ' +
+        'threads; page older archived by passing the oldest returned archivedAt as before ' +
+        '(hasMore = more remain; limit ≤100, default 50). Without channelId: active threads across ' +
+        'your servers. Returns { threads, hasMore }; read one with get_messages(channelId=thread id).',
       inputSchema: {
         channelId: z
           .string()
@@ -71,38 +70,15 @@ export function registerListThreads(server: McpServer, deps: ToolDeps): void {
         if (!channel || !('threads' in channel)) {
           return errorResult(`Channel ${args.channelId} does not have threads.`);
         }
-        const firstPage = args.before === undefined;
 
-        if (firstPage) {
+        if (args.before === undefined) {
           const active = await channel.threads.fetchActive();
           collected.push(...active.threads.values());
         }
 
         const pub = await channel.threads.fetchArchived({ type: 'public', before: args.before, limit });
-        const pubThreads = [...pub.threads.values()];
-        collected.push(...pubThreads);
+        collected.push(...pub.threads.values());
         hasMore = pub.hasMore;
-
-        // Приватные архивные — только на первой странице: joined-эндпоинт листается по id (не
-        // совместим с timestamp-курсором public), а с Manage Threads у бота (fetchAll) их обычно
-        // немного. best-effort; per-caller гейт ниже отсекает треды, где вызвавший не член.
-        if (firstPage) {
-          const me = channel.guild.members.me;
-          const botCanManage = me?.permissionsIn(channel).has(PermissionFlagsBits.ManageThreads) ?? false;
-          try {
-            const priv = await channel.threads.fetchArchived({ type: 'private', fetchAll: botCanManage, limit });
-            let privThreads = [...priv.threads.values()];
-            // Курсор — по public. Чтобы листание по общему oldest не перескочило public, не отдаём
-            // private старше самого старого public на этой странице (когда у public есть продолжение).
-            if (pub.hasMore && pubThreads.length > 0) {
-              const oldestPub = Math.min(...pubThreads.map((t) => t.archiveTimestamp ?? 0));
-              privThreads = privThreads.filter((t) => (t.archiveTimestamp ?? 0) >= oldestPub);
-            }
-            collected.push(...privThreads);
-          } catch {
-            // даже joined-private может отдать 403 в краевых случаях — best-effort
-          }
-        }
       } else {
         for (const guild of deps.discord.guilds.cache.values()) {
           const active = await guild.channels.fetchActiveThreads();

@@ -12,10 +12,10 @@ export function registerSearchMessages(server: McpServer, deps: ToolDeps): void 
     'search_messages',
     {
       description:
-        'Search messages in channels you may see, via Discord\'s index. Every filter is optional — ' +
-        'filter-only search (no text) works. Returns light hits; expand one with ' +
-        'get_message(channelId, messageId). Freshly posted or edited messages may lag the index briefly — ' +
-        'for the very latest use get_messages. Page with limit (≤25) + offset; may have more pages if results = limit.',
+        'Search messages in channels you may see, via Discord\'s index. All filters optional ' +
+        '(filter-only search works). Returns light hits — expand with get_message(channelId, messageId). ' +
+        'Freshly posted/edited messages may lag the index; for the latest use get_messages. ' +
+        'Page with limit (≤25) + offset; more pages likely if results = limit.',
       inputSchema: {
         content: z
           .string()
