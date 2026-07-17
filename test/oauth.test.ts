@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
-import { InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import {
+  InvalidGrantError,
+  InvalidTokenError,
+  TemporarilyUnavailableError,
+} from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthorizationParams } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { Response } from 'express';
@@ -18,6 +22,14 @@ const past = () => Date.now() - 1_000;
 function newProvider(isMember = true) {
   const cfg = config();
   const discord = fakeClient({ guilds: { g1: fakeGuild({ id: 'g1', hasMember: isMember }) } });
+  const db = openDb(cfg);
+  return { provider: new DiscordFederatedProvider(cfg, discord, db), db };
+}
+
+// Discord недоступен (клиент не готов) → checkMembershipStatus вернёт unavailable.
+function newProviderUnavailable() {
+  const cfg = config();
+  const discord = fakeClient({ ready: false, guilds: { g1: fakeGuild({ id: 'g1', hasMember: true }) } });
   const db = openDb(cfg);
   return { provider: new DiscordFederatedProvider(cfg, discord, db), db };
 }
@@ -69,6 +81,21 @@ describe('exchangeRefreshToken — rotation + TTL + гейт членства', 
     db.close();
   });
 
+  it('одноразовость при конкуренции: два запроса с одним refresh → одна пара, второй InvalidGrantError', async () => {
+    const { provider, db } = newProvider(true);
+    store.saveRefresh(db, 'r', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
+    const [a, b] = await Promise.allSettled([
+      provider.exchangeRefreshToken(CLIENT, 'r'),
+      provider.exchangeRefreshToken(CLIENT, 'r'),
+    ]);
+    const ok = [a, b].filter((x) => x.status === 'fulfilled');
+    const err = [a, b].filter((x): x is PromiseRejectedResult => x.status === 'rejected');
+    assert.equal(ok.length, 1); // атомарный claim: только один прошёл
+    assert.equal(err.length, 1);
+    assert.ok(err[0].reason instanceof InvalidGrantError);
+    db.close();
+  });
+
   it('несуществующий refresh → InvalidGrantError (400 invalid_grant)', async () => {
     const { provider, db } = newProvider(true);
     await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'nope'), InvalidGrantError);
@@ -96,6 +123,95 @@ describe('exchangeRefreshToken — rotation + TTL + гейт членства', 
     await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'r'), InvalidGrantError);
     assert.equal(store.getToken(db, 'acc'), undefined); // access отозван
     assert.equal(store.getRefresh(db, 'r'), undefined); // refresh отозван
+    db.close();
+  });
+
+  it('Discord недоступен → TemporarilyUnavailableError, refresh НЕ трогаем', async () => {
+    const { provider, db } = newProviderUnavailable();
+    store.saveRefresh(db, 'r', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
+    await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'r'), TemporarilyUnavailableError);
+    assert.ok(store.getRefresh(db, 'r')); // refresh уцелел — транзиентный сбой не разлогинивает
+    db.close();
+  });
+
+});
+
+describe('verifyAccessToken — трёхстатусный гейт членства', () => {
+  it('подтверждённый не-член → InvalidTokenError + отзыв всех токенов', async () => {
+    const { provider, db } = newProvider(false);
+    store.saveToken(db, 'acc', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
+    store.saveRefresh(db, 'r', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
+    await assert.rejects(() => provider.verifyAccessToken('acc'), InvalidTokenError);
+    assert.equal(store.getToken(db, 'acc'), undefined);
+    assert.equal(store.getRefresh(db, 'r'), undefined);
+    db.close();
+  });
+
+  it('Discord недоступен → TemporarilyUnavailableError, токен НЕ трогаем', async () => {
+    const { provider, db } = newProviderUnavailable();
+    store.saveToken(db, 'acc', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
+    await assert.rejects(() => provider.verifyAccessToken('acc'), TemporarilyUnavailableError);
+    assert.ok(store.getToken(db, 'acc')); // токен уцелел — транзиентный сбой не разлогинивает
+    db.close();
+  });
+});
+
+describe('exchangeAuthorizationCode — маппинг ошибок (400 invalid_grant, не 500)', () => {
+  it('несуществующий authorization code → InvalidGrantError', async () => {
+    const { provider, db } = newProvider(true);
+    await assert.rejects(() => provider.exchangeAuthorizationCode(CLIENT, 'nope'), InvalidGrantError);
+    db.close();
+  });
+
+  it('challengeForAuthorizationCode на несуществующий code → InvalidGrantError', async () => {
+    const { provider, db } = newProvider(true);
+    await assert.rejects(() => provider.challengeForAuthorizationCode(CLIENT, 'nope'), InvalidGrantError);
+    db.close();
+  });
+});
+
+describe('callback errors → OAuth error-redirect в клиент (RFC 6749 §4.1.2.1)', () => {
+  // Заводит pending через authorize и возвращает наш внутренний state.
+  async function mintPending(provider: DiscordFederatedProvider, clientState = 'client-state-123') {
+    let authUrl = '';
+    const res = { redirect: (u: string) => { authUrl = u; } } as unknown as Response;
+    const params = { codeChallenge: 'x', redirectUri: 'https://client.test/cb', state: clientState } as AuthorizationParams;
+    await provider.authorize(CLIENT, params, res);
+    return new URL(authUrl).searchParams.get('state') as string;
+  }
+
+  it('отказ в Discord → редирект в клиент с error=access_denied и исходным state', async () => {
+    const { provider, db } = newProvider(true);
+    const state = await mintPending(provider);
+    const redirect = provider.denyPending(state, 'access_denied', 'denied');
+    const u = new URL(redirect as string);
+    assert.equal(u.origin + u.pathname, 'https://client.test/cb');
+    assert.equal(u.searchParams.get('error'), 'access_denied');
+    assert.ok(u.searchParams.get('error_description'));
+    assert.equal(u.searchParams.get('state'), 'client-state-123'); // исходный client state пробрасывается
+    assert.equal(u.searchParams.get('code'), null); // никакого кода на ошибке
+    db.close();
+  });
+
+  it('denyPending одноразов и null на неизвестный state (нет доверенной цели → HTML)', async () => {
+    const { provider, db } = newProvider(true);
+    const state = await mintPending(provider);
+    assert.ok(provider.denyPending(state, 'access_denied', 'x')); // pending потреблён
+    assert.equal(provider.denyPending(state, 'access_denied', 'x'), null); // повтор — уже нет
+    assert.equal(provider.denyPending('unknown', 'access_denied', 'x'), null);
+    db.close();
+  });
+
+  it('протухший pending → error-redirect access_denied, а не throw', async () => {
+    const { provider, db } = newProvider(true);
+    const state = await mintPending(provider);
+    // старим pending, чтобы сработала ветка expiresAt < now до всякой сети
+    const pend = (provider as unknown as { pending: Map<string, { expiresAt: number }> }).pending.get(state);
+    if (pend) pend.expiresAt = past();
+    const redirect = await provider.handleDiscordCallback('any-code', state);
+    const u = new URL(redirect);
+    assert.equal(u.searchParams.get('error'), 'access_denied');
+    assert.equal(u.searchParams.get('state'), 'client-state-123');
     db.close();
   });
 });

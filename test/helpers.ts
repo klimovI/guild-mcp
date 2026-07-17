@@ -1,6 +1,7 @@
 import {
   ChannelType,
   type Client,
+  DiscordAPIError,
   type GuildBasedChannel,
   type GuildMember,
   PermissionFlagsBits,
@@ -30,9 +31,14 @@ export function member(id = 'u1'): GuildMember {
   return { id } as unknown as GuildMember;
 }
 
-// fetch, который кидает (нет member'а / ошибка Discord) — для fail-closed веток.
+// fetch, который кидает транзиентную (не Discord-API) ошибку — для fail-closed веток и статуса unavailable.
 const throwFetch = async (): Promise<never> => {
   throw new Error('member not resolvable');
+};
+
+// fetch, который кидает Discord «Unknown Member» — подтверждённое отсутствие участника (статус not_member).
+const throwNotMember = async (): Promise<never> => {
+  throw new DiscordAPIError({ code: 10007, message: 'Unknown Member' }, 10007, 404, 'GET', 'https://discord/api/members', {});
 };
 
 type ChannelOpts = {
@@ -84,15 +90,18 @@ type ClientOpts = {
   cache?: Record<string, GuildBasedChannel>;
   /** channelId → канал, доступный только через fetch (не в кэше). */
   fetchable?: Record<string, GuildBasedChannel>;
-  /** guildId → гильдия для guilds.cache (isMemberOfAnyServedGuild / visibleChannelsForUser). */
+  /** guildId → гильдия для guilds.cache (checkMembershipStatus / visibleChannelsForUser). */
   guilds?: Record<string, unknown>;
   /** мок client.rest (для search — queueRequest, отдающий { status, json }). */
   rest?: unknown;
+  /** client.isReady() (по умолчанию true; false → checkMembershipStatus вернёт unavailable). */
+  ready?: boolean;
 };
 
 export function fakeClient(opts: ClientOpts = {}): Client {
-  const { cache = {}, fetchable = {}, guilds = {}, rest } = opts;
+  const { cache = {}, fetchable = {}, guilds = {}, rest, ready = true } = opts;
   return {
+    isReady: () => ready,
     channels: {
       cache: new Map(Object.entries(cache)),
       fetch: async (id: string) => fetchable[id] ?? null,
@@ -115,20 +124,23 @@ type GuildOpts = {
   hasMember?: boolean;
   /** каналы гильдии для visibleChannelsFor (итерируются через member.guild.channels.cache). */
   channels?: GuildBasedChannel[];
+  /** при hasMember:false бросить транзиентную ошибку (→ unavailable) вместо Unknown Member (→ not_member). */
+  fetchThrowsTransient?: boolean;
 };
 
 // visibleChannelsFor читает member.guild.channels.cache — потому fetched-member
 // указывает обратно на гильдию с этими каналами.
 export function fakeGuild(opts: GuildOpts = {}): unknown {
-  const { id = 'g1', hasMember = true, channels = [] } = opts;
+  const { id = 'g1', hasMember = true, channels = [], fetchThrowsTransient = false } = opts;
   const channelsCache = new Map(channels.map((c, i) => [String(i), c]));
   const guildRef = { id, channels: { cache: channelsCache } };
   const m = { id: 'u1', guild: guildRef } as unknown as GuildMember;
+  const missing = fetchThrowsTransient ? throwFetch : throwNotMember;
   return {
     id,
     channels: { cache: channelsCache },
     members: {
-      fetch: hasMember ? async () => m : throwFetch,
+      fetch: hasMember ? async () => m : missing,
     },
   };
 }

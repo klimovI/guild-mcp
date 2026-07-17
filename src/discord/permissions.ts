@@ -1,6 +1,7 @@
 import {
   ChannelType,
   type Client,
+  DiscordAPIError,
   type Guild,
   type GuildBasedChannel,
   type GuildMember,
@@ -78,18 +79,32 @@ export async function canUserViewChannel(client: Client, userId: string, channel
   }
 }
 
-// Состоит ли пользователь хотя бы в одной гильдии бота.
-// Гейт авторизации: чужак, не деляший ни одного сервера с ботом, не должен получить токен.
-export async function isMemberOfAnyServedGuild(client: Client, userId: string): Promise<boolean> {
+// Гейт авторизации: состоит ли пользователь хотя бы в одной гильдии бота. Три состояния, потому что
+// отзывать токены можно ТОЛЬКО на подтверждённом not_member — на unavailable (Discord недоступен: не
+// готов / кэш пуст / таймаут / 5xx) сбой не должен разлогинивать (временная ошибка без мутации БД).
+export type MembershipStatus = 'member' | 'not_member' | 'unavailable';
+
+// Коды Discord, однозначно означающие «такого участника здесь нет» (в отличие от сетевых/серверных сбоев).
+const NOT_MEMBER_CODES = new Set<number>([10007, 10013]); // Unknown Member, Unknown User
+
+function confirmsNonMembership(err: unknown): boolean {
+  return err instanceof DiscordAPIError && NOT_MEMBER_CODES.has(err.code as number);
+}
+
+export async function checkMembershipStatus(client: Client, userId: string): Promise<MembershipStatus> {
+  if (!client.isReady()) return 'unavailable'; // не готов → кэш гильдий не наполнен, выход не подтверждаем
+  // Готовый клиент с 0 гильдий = бот реально ни в одной (Ready ждёт загрузки гильдий) → fail-closed:
+  // пустой цикл вернёт not_member (чистый отзыв), а не вечный unavailable.
+  let sawError = false;
   for (const guild of botGuilds(client)) {
     try {
       await guild.members.fetch(userId);
-      return true;
-    } catch {
-      // не member этой гильдии — проверяем следующую
+      return 'member';
+    } catch (e) {
+      if (!confirmsNonMembership(e)) sawError = true; // транзиентный сбой Discord, а не «не член»
     }
   }
-  return false;
+  return sawError ? 'unavailable' : 'not_member';
 }
 
 // Гильдии бота, где вызвавший состоит (опц. сужение до одной по guildId).

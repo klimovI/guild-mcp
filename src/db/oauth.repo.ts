@@ -129,8 +129,10 @@ export function getRefresh(db: DB, token: string): StoredRefresh | undefined {
   };
 }
 
-export function deleteRefresh(db: DB, token: string): void {
-  stmts(db).delRefresh.run(hashToken(token));
+// Возвращает true, если строка реально удалена (changes>0) — используется как атомарный
+// single-use claim при ротации: только удаливший строку выпускает новую пару.
+export function deleteRefresh(db: DB, token: string): boolean {
+  return stmts(db).delRefresh.run(hashToken(token)).changes > 0;
 }
 
 // Отзыв всех токенов пользователя (разлогин при выходе из гильдий).

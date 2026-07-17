@@ -5,7 +5,7 @@ import {
   canUserView,
   canUserViewChannel,
   canView,
-  isMemberOfAnyServedGuild,
+  checkMembershipStatus,
   visibleChannelsForUser,
 } from '../src/discord/permissions.js';
 import {
@@ -112,21 +112,40 @@ describe('canUserViewChannel — только ViewChannel (метаданные)
   });
 });
 
-describe('isMemberOfAnyServedGuild — гейт авторизации', () => {
-  it('член хотя бы одной гильдии бота → true', async () => {
+describe('checkMembershipStatus — гейт авторизации (три состояния)', () => {
+  it('член хотя бы одной гильдии бота → member', async () => {
     const client = fakeClient({
       guilds: { g1: fakeGuild({ id: 'g1', hasMember: false }), g2: fakeGuild({ id: 'g2', hasMember: true }) },
     });
-    assert.equal(await isMemberOfAnyServedGuild(client, 'u1'), true);
+    assert.equal(await checkMembershipStatus(client, 'u1'), 'member');
   });
-  it('не член ни одной → false', async () => {
+  it('Discord подтвердил отсутствие во всех (Unknown Member) → not_member', async () => {
     const client = fakeClient({
       guilds: { g1: fakeGuild({ id: 'g1', hasMember: false }) },
     });
-    assert.equal(await isMemberOfAnyServedGuild(client, 'u1'), false);
+    assert.equal(await checkMembershipStatus(client, 'u1'), 'not_member');
   });
-  it('бот в 0 гильдий → false (fail-closed, пустой список)', async () => {
-    assert.equal(await isMemberOfAnyServedGuild(fakeClient(), 'u1'), false);
+  it('транзиентный сбой Discord (не 10007) → unavailable, НЕ not_member', async () => {
+    const client = fakeClient({
+      guilds: { g1: fakeGuild({ id: 'g1', hasMember: false, fetchThrowsTransient: true }) },
+    });
+    assert.equal(await checkMembershipStatus(client, 'u1'), 'unavailable');
+  });
+  it('часть гильдий сбоит, членство нигде не подтверждено → unavailable', async () => {
+    const client = fakeClient({
+      guilds: {
+        g1: fakeGuild({ id: 'g1', hasMember: false }), // 10007
+        g2: fakeGuild({ id: 'g2', hasMember: false, fetchThrowsTransient: true }), // сбой
+      },
+    });
+    assert.equal(await checkMembershipStatus(client, 'u1'), 'unavailable');
+  });
+  it('клиент не готов (isReady=false) → unavailable', async () => {
+    const client = fakeClient({ ready: false, guilds: { g1: fakeGuild({ id: 'g1', hasMember: true }) } });
+    assert.equal(await checkMembershipStatus(client, 'u1'), 'unavailable');
+  });
+  it('готовый клиент, бот в 0 гильдий → not_member (fail-closed, чистый отзыв)', async () => {
+    assert.equal(await checkMembershipStatus(fakeClient(), 'u1'), 'not_member');
   });
 });
 

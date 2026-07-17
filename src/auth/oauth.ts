@@ -2,7 +2,11 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import type { Client } from 'discord.js';
 import type { Application, Response } from 'express';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
-import { InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import {
+  InvalidGrantError,
+  InvalidTokenError,
+  TemporarilyUnavailableError,
+} from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthorizationParams, OAuthServerProvider } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
@@ -14,11 +18,8 @@ import type {
 import type { Config } from '../config.js';
 import type { DB } from '../db/db.js';
 import * as store from '../db/oauth.repo.js';
-import { isMemberOfAnyServedGuild } from '../discord/permissions.js';
+import { checkMembershipStatus } from '../discord/permissions.js';
 import { buildAuthorizeUrl, exchangeCodeForUserId } from './discord-idp.js';
-
-// Пользователь прошёл Discord-логин, но не состоит ни в одной гильдии бота → доступ запрещён.
-export class AuthorizationDeniedError extends Error {}
 
 // guild-mcp сам является Authorization Server для MCP-клиента (Claude), а вход пользователя
 // федерирует в Discord (Discord как login-IdP). SDK даёт эндпоинты/PKCE/DCR; здесь — логика провайдера.
@@ -58,6 +59,15 @@ interface AuthCode {
   expiresAt: number;
 }
 
+// OAuth error-redirect в клиент (RFC 6749 §4.1.2.1). Безопасно: redirect_uri провалидирован SDK на /authorize.
+function errorRedirect(pend: PendingAuth, error: string, description: string): string {
+  const url = new URL(pend.redirectUri);
+  url.searchParams.set('error', error);
+  url.searchParams.set('error_description', description);
+  if (pend.clientState !== undefined) url.searchParams.set('state', pend.clientState);
+  return url.href;
+}
+
 export class DiscordFederatedProvider implements OAuthServerProvider {
   private readonly pending = new Map<string, PendingAuth>();
   private readonly codes = new Map<string, AuthCode>();
@@ -95,21 +105,33 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
     res.redirect(buildAuthorizeUrl(this.config, state));
   }
 
-  // Discord-callback (наш эндпоинт): обменять discord code -> user id, минтить наш auth code,
-  // вернуть URL редиректа обратно к MCP-клиенту с нашим code + его state.
+  // Обменять discord code → user id, минтить наш auth code, вернуть URL редиректа в MCP-клиент.
+  // Ошибки уходят клиенту как OAuth error-redirect (клиент не виснет); throw — лишь на неизвестный
+  // state (доверенной цели нет → HTML, иначе open-redirect).
   async handleDiscordCallback(discordCode: string, state: string): Promise<string> {
     const pend = this.pending.get(state);
     if (!pend) throw new Error('unknown state');
     this.pending.delete(state);
-    if (pend.expiresAt < Date.now()) throw new Error('authorization request expired');
+    if (pend.expiresAt < Date.now()) {
+      return errorRedirect(pend, 'access_denied', 'authorization request expired');
+    }
 
-    const discordUserId = await exchangeCodeForUserId(this.config, discordCode);
+    let discordUserId: string;
+    try {
+      discordUserId = await exchangeCodeForUserId(this.config, discordCode);
+    } catch (e) {
+      console.error('discord code exchange failed:', e); // иначе логин-аутэйдж (secret/Discord/сеть) невидим
+      return errorRedirect(pend, 'server_error', 'failed to exchange Discord authorization code');
+    }
 
     // Гейт: доступ только тем, кто делит с ботом хотя бы одну гильдию (не чужакам).
-    if (!(await isMemberOfAnyServedGuild(this.discord, discordUserId))) {
-      throw new AuthorizationDeniedError(
-        'You are not a member of any Discord server this bot is in.',
-      );
+    // unavailable (Discord недоступен) НЕ трактуем как отказ — иначе сбой блокировал бы легитимный вход.
+    const status = await checkMembershipStatus(this.discord, discordUserId);
+    if (status === 'not_member') {
+      return errorRedirect(pend, 'access_denied', 'not a member of any Discord server this bot is in');
+    }
+    if (status === 'unavailable') {
+      return errorRedirect(pend, 'temporarily_unavailable', 'Discord is temporarily unavailable');
     }
 
     const code = randomBytes(32).toString('base64url');
@@ -128,18 +150,28 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
     return url.href;
   }
 
+  // Discord вернул error на своём callback (юзер отказал и т.п.): пробрасываем клиенту как OAuth-ошибку.
+  // Возвращает URL редиректа в клиент, либо null если state неизвестен (нет доверенной цели → HTML).
+  denyPending(state: string, error: string, description: string): string | null {
+    const pend = this.pending.get(state);
+    if (!pend) return null;
+    this.pending.delete(state);
+    return errorRedirect(pend, error, description);
+  }
+
   // SDK локально валидирует PKCE: S256(code_verifier) должен совпасть с этим challenge.
   async challengeForAuthorizationCode(_client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
+    // InvalidGrantError → SDK отдаёт 400 invalid_grant; голый Error → 500 (клиент не переавторизуется).
     const c = this.codes.get(authorizationCode);
-    if (!c) throw new Error('invalid authorization code');
+    if (!c) throw new InvalidGrantError('invalid authorization code');
     return c.codeChallenge;
   }
 
   async exchangeAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string): Promise<OAuthTokens> {
     const c = this.codes.get(authorizationCode);
-    if (!c || c.clientId !== client.client_id) throw new Error('invalid authorization code');
+    if (!c || c.clientId !== client.client_id) throw new InvalidGrantError('invalid authorization code');
     this.codes.delete(authorizationCode);
-    if (c.expiresAt < Date.now()) throw new Error('authorization code expired');
+    if (c.expiresAt < Date.now()) throw new InvalidGrantError('authorization code expired');
     return this.issueTokens(c.discordUserId, client.client_id, [], c.resource);
   }
 
@@ -152,13 +184,26 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
     // обычный Error SDK мапит в 500 (клиент не перелогинится).
     const r = store.getRefresh(this.db, refreshToken);
     if (!r || r.clientId !== client.client_id) throw new InvalidGrantError('invalid refresh token');
-    store.deleteRefresh(this.db, refreshToken); // rotation: старый refresh одноразовый
-    if (r.expiresAt < Date.now()) throw new InvalidGrantError('refresh token expired');
-    // Членство перепроверяется и на refresh: вышедший из всех гильдий не должен
-    // получать свежий access (хоть и инертный на чтении). Провал → разлогин.
-    if (!(await isMemberOfAnyServedGuild(this.discord, r.discordUserId))) {
+    if (r.expiresAt < Date.now()) {
+      store.deleteRefresh(this.db, refreshToken);
+      throw new InvalidGrantError('refresh token expired');
+    }
+    // Членство перепроверяется и на refresh: вышедший из всех гильдий не должен получать свежий
+    // access. Проверяем ДО любой мутации строки — на not_member/unavailable ротацию не начинаем.
+    const status = await checkMembershipStatus(this.discord, r.discordUserId);
+    if (status === 'not_member') {
       store.deleteUserTokens(this.db, r.discordUserId);
       throw new InvalidGrantError('access revoked: no longer a member of any served guild');
+    }
+    if (status === 'unavailable') {
+      // Discord недоступен → выход не подтверждён; строку НЕ трогаем — транзиентный сбой не жжёт
+      // сессию, а конкурентный /revoke не «воскрешается» восстановлением. Клиент повторит.
+      throw new TemporarilyUnavailableError('membership check unavailable; please retry');
+    }
+    // Одноразовость под конкуренцией: delete — атомарный claim (delete→issue синхронны, без await между
+    // ними), только реально удаливший строку минтит пару; отозванный/проигравший конкурент → invalid_grant.
+    if (!store.deleteRefresh(this.db, refreshToken)) {
+      throw new InvalidGrantError('invalid refresh token');
     }
     return this.issueTokens(r.discordUserId, client.client_id, scopes ?? r.scopes);
   }
@@ -174,9 +219,14 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
     }
     // Членство перепроверяется на каждый запрос: вышел/исключён из всех гильдий бота
     // → немедленно разлогиниваем (отзываем все его токены) → 401 → переавторизация.
-    if (!(await isMemberOfAnyServedGuild(this.discord, t.discordUserId))) {
+    const status = await checkMembershipStatus(this.discord, t.discordUserId);
+    if (status === 'not_member') {
       store.deleteUserTokens(this.db, t.discordUserId);
       throw new InvalidTokenError('access revoked: no longer a member of any served guild');
+    }
+    if (status === 'unavailable') {
+      // Discord недоступен → выход не подтверждён; токены НЕ трогаем, клиент повторит (SDK → 400, не 401/500).
+      throw new TemporarilyUnavailableError('membership check unavailable; please retry');
     }
     return {
       token,
@@ -245,19 +295,27 @@ export function mountAuth(app: Application, config: Config, provider: DiscordFed
 
   const callbackPath = new URL(config.OAUTH_REDIRECT_URI).pathname;
   app.get(callbackPath, (req, res) => {
-    const { code, state } = req.query;
-    if (typeof code !== 'string' || typeof state !== 'string') {
-      res.status(400).send('missing code/state');
+    const { code, state, error } = req.query;
+    if (typeof state !== 'string') {
+      res.status(400).send('missing state'); // без state нет доверенной цели редиректа
+      return;
+    }
+    // Discord вернул ошибку (юзер отказал в согласии и т.п.) → пробрасываем клиенту как access_denied.
+    if (typeof error === 'string') {
+      const redirect = provider.denyPending(state, 'access_denied', 'Discord authorization was denied');
+      if (redirect) res.redirect(redirect);
+      else res.status(400).send('Authorization denied.');
+      return;
+    }
+    if (typeof code !== 'string') {
+      res.status(400).send('missing code');
       return;
     }
     provider
       .handleDiscordCallback(code, state)
       .then((redirect) => res.redirect(redirect))
       .catch((e: unknown) => {
-        if (e instanceof AuthorizationDeniedError) {
-          res.status(403).send('Access denied. You are not a member of any Discord server this bot is in.');
-          return;
-        }
+        // Сюда доходит только неизвестный state (нет доверенного redirect_uri) — показываем HTML.
         console.error('oauth callback error:', e);
         res.status(400).send('OAuth callback failed.');
       });
