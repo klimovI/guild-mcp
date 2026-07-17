@@ -62,7 +62,7 @@ export interface SearchHit {
     size: number | null;
     url: string;
   }[];
-  embeds: number; // счётчик; полную карточку разворачивает get_message
+  embedCount: number; // счётчик; сами эмбеды разворачивает get_message
 }
 
 export interface SearchResult {
@@ -114,7 +114,7 @@ function formatHit(m: RawMessage, guildId: string): SearchHit {
       size: a.size ?? null,
       url: a.url,
     })),
-    embeds: m.embeds?.length ?? 0,
+    embedCount: m.embeds?.length ?? 0,
   };
 }
 
