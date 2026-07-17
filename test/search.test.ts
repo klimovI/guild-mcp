@@ -34,7 +34,7 @@ describe('search — скоупинг и формат', () => {
       ),
     );
     const res = await search(client, 'u1', { limit: 25 });
-    assert.equal(res.totalResults, 1);
+    assert.equal(res.hasMore, false); // 1 в индексе, 1 отдали — больше нет
     assert.equal(res.messages.length, 1);
     assert.equal(res.messages[0].url, 'https://discord.com/channels/g1/c1/m1');
     assert.equal(res.messages[0].attachments[0].name, 'f.png');
@@ -48,7 +48,7 @@ describe('search — скоупинг и формат', () => {
       return restResponse(200, rawBody([]));
     });
     const res = await search(client, 'u1', { limit: 25, channelId: 'cNope' });
-    assert.equal(res.totalResults, 0);
+    assert.equal(res.hasMore, false);
     assert.equal(res.messages.length, 0);
     assert.equal(called, false);
   });
@@ -64,7 +64,7 @@ describe('search — скоупинг и формат', () => {
     );
     const res = await search(client, 'u1', { limit: 25, authorId: 'u2' });
     assert.equal(res.messages.length, 0); // guard отсёк
-    assert.equal(res.totalResults, 1); // счётчик Discord оставляем как есть
+    assert.equal(res.hasMore, false); // страница Discord отдана целиком, за ней ничего нет
   });
 
   it('hit из недоступного канала → отфильтрован, содержимое не раскрывается (fail-closed)', async () => {
@@ -82,6 +82,7 @@ describe('search — скоупинг и формат', () => {
     const res = await search(client, 'u1', { limit: 25 });
     assert.equal(res.messages.length, 1); // недоступный дропнут
     assert.equal(res.messages[0].channelId, 'c1');
+    assert.equal(res.hasMore, false); // скрытый hit не раздувает счётчик наружу
     assert.ok(!JSON.stringify(res).includes(secret)); // содержимое не утекло
   });
 
@@ -115,8 +116,26 @@ describe('search — скоупинг и формат', () => {
     const res = await search(client, 'u1', { limit: 25 });
     assert.equal(seenCounts.length, 2);
     assert.deepEqual([...seenCounts].sort((a, b) => a - b), [50, 100]);
-    assert.equal(res.totalResults, 20); // 10 + 10
+    assert.equal(res.hasMore, true); // 20 в индексе, отдали 2 — есть ещё
     assert.equal(res.messages.length, 2);
+  });
+
+  it('мульти-чанк: видимых больше лимита → часть срезана, но hasMore=true (не теряем молча)', async () => {
+    // 150 каналов → 2 чанка, каждый вернул по видимому хиту (total_results=1). Слитых видимых 2 > лимит 1:
+    // один срезается, но hasMore обязан честно сказать «есть ещё» — offset при мульти-запросе недоступен.
+    const channels = Array.from({ length: 150 }, (_, i) => fakeChannel({ id: `c${i}` }));
+    let n = 0;
+    const client = clientWith(channels, async (req: { query: URLSearchParams }) => {
+      const ids = req.query.getAll('channel_id');
+      n += 1;
+      return restResponse(
+        200,
+        rawBody([{ id: `m${n}`, channel_id: ids[0], timestamp: `2024-01-0${n}T00:00:00.000Z`, author: { id: 'u2' } }]),
+      );
+    });
+    const res = await search(client, 'u1', { limit: 1 });
+    assert.equal(res.messages.length, 1); // срезано до лимита
+    assert.equal(res.hasMore, true); // осталась ещё видимая — флаг честный
   });
 
   it('offset>0 при чанкинге (>100 каналов, много запросов) → SearchPaginationError', async () => {

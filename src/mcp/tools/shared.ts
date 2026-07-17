@@ -264,26 +264,28 @@ export async function formatMessageCompact(
   };
 }
 
+// Достаёт процитированное с той же проверкой прав, что и на прямое чтение. Нет доступа → null.
+export type ReferenceResolver = (channelId: string, messageId: string) => Promise<Message<true> | null>;
+
 // get_message — одно сообщение целиком: эмбеды с полями, опрос с голосами, raw-компоненты,
-// содержимое форвардов, и превью процитированного (доп-запрос fetchReference, best-effort).
+// содержимое форвардов, и превью процитированного.
 export async function formatMessageFull(
   msg: Message<true>,
   gate: ChannelGate,
+  resolveReference: ReferenceResolver,
 ): Promise<Record<string, unknown>> {
   let ref = reference(msg);
-  // Превью процитированного показываем только если вызвавший видит канал target'а (reply может
-  // ссылаться на другой канал) — иначе оставляем лишь ids, без автора/содержимого.
+  // Процитированное резолвим через resolveReference — reply может ссылаться на другой канал.
   const refChannelId = msg.reference?.channelId;
-  if (ref && refChannelId && (await gate(refChannelId))) {
-    try {
-      const target = await msg.fetchReference();
+  const refMessageId = msg.reference?.messageId;
+  if (ref && refChannelId && refMessageId) {
+    const target = await resolveReference(refChannelId, refMessageId);
+    if (target) {
       ref = {
         ...ref,
         author: target.member?.displayName ?? target.author.displayName,
         content: truncate(target.content, 300),
       };
-    } catch {
-      // процитированное недоступно/удалено — оставляем только ids
     }
   }
   return {

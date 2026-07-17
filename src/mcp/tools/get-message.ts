@@ -28,7 +28,14 @@ export function registerGetMessage(server: McpServer, deps: ToolDeps): void {
         return fetchErrorResult(e, `Failed to fetch message ${args.messageId} in channel ${args.channelId}`);
       }
       const gate = makeChannelGate(deps, caller.userId);
-      return jsonResult(await formatMessageFull(msg, gate));
+      const resolveReference = async (channelId: string, messageId: string) => {
+        try {
+          return await fetchMessage(deps.discord, caller.userId, channelId, messageId);
+        } catch {
+          return null; // недоступно/удалено/нет прав на target — оставляем только ids
+        }
+      };
+      return jsonResult(await formatMessageFull(msg, gate, resolveReference));
     },
   );
 }

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Message } from 'discord.js';
+import { fetchMessage } from '../src/discord/messages.js';
 import { formatMessageCompact, formatMessageFull } from '../src/mcp/tools/shared.js';
+import { fakeChannel, fakeClient, perms, VIEW } from './helpers.js';
 
 // Покрывает security-критичный гейтинг в shared.ts: имена/содержимое каналов, недоступных
 // вызвавшему (mentions/thread/reply-preview), НЕ должны протечь. gate управляем из теста.
@@ -11,11 +13,10 @@ type MsgOpts = {
   mentionChannels?: { id: string; name: string }[];
   thread?: { id: string; name: string } | null;
   reference?: { messageId: string; channelId: string; guildId?: string; type: number } | null;
-  fetchReference?: () => Promise<unknown>;
 };
 
 function fakeMessage(opts: MsgOpts = {}): Message<true> {
-  const { cleanContent = '', mentionChannels = [], thread = null, reference = null, fetchReference } = opts;
+  const { cleanContent = '', mentionChannels = [], thread = null, reference = null } = opts;
   return {
     id: 'm1',
     channelId: 'c1',
@@ -49,7 +50,6 @@ function fakeMessage(opts: MsgOpts = {}): Message<true> {
     poll: null,
     messageSnapshots: new Map(),
     reference,
-    fetchReference,
   } as unknown as Message<true>;
 }
 
@@ -89,24 +89,48 @@ describe('formatMessageCompact — гейтинг имени треда', () => 
 });
 
 describe('formatMessageFull — гейтинг превью процитированного (reply)', () => {
-  const target = { member: { displayName: 'Ann' }, author: { displayName: 'ann' }, content: 'quoted text' };
-  const msg = () =>
-    fakeMessage({
-      reference: { messageId: 'm2', channelId: 'cX', guildId: 'g1', type: 0 },
-      fetchReference: async () => target,
-    });
+  const target = {
+    member: { displayName: 'Ann' },
+    author: { displayName: 'ann' },
+    content: 'quoted text',
+  } as unknown as Message<true>;
+  const msg = () => fakeMessage({ reference: { messageId: 'm2', channelId: 'cX', guildId: 'g1', type: 0 } });
 
-  it('канал-цель недоступен → только ids, без author/content', async () => {
-    const out = (await formatMessageFull(msg(), DENY)) as { reference: Record<string, unknown> };
+  const RESOLVE_TARGET = async () => target;
+  const NO_ACCESS = async () => null;
+
+  it('resolver вернул null (нет доступа к target) → только ids, без author/content', async () => {
+    const out = (await formatMessageFull(msg(), ALLOW, NO_ACCESS)) as { reference: Record<string, unknown> };
     assert.equal(out.reference.messageId, 'm2');
     assert.equal(out.reference.channelId, 'cX');
     assert.equal(out.reference.author, undefined);
     assert.equal(out.reference.content, undefined);
   });
 
-  it('канал-цель доступен → добавляется превью (author + content)', async () => {
-    const out = (await formatMessageFull(msg(), ALLOW)) as { reference: Record<string, unknown> };
+  it('resolver вернул target → добавляется превью (author + content)', async () => {
+    const out = (await formatMessageFull(msg(), ALLOW, RESOLVE_TARGET)) as { reference: Record<string, unknown> };
     assert.equal(out.reference.author, 'Ann');
     assert.equal(out.reference.content, 'quoted text');
+  });
+});
+
+describe('formatMessageFull — reply-превью не обходит ReadMessageHistory', () => {
+  // target-канал даёт ViewChannel, но НЕ ReadMessageHistory. resolver поверх реального fetchMessage
+  // (тот же гейт, что и на прямое чтение) → доступ закрыт, превью не течёт.
+  it('ViewChannel=true, ReadMessageHistory=false → reference только ids, без author/content', async () => {
+    const refChannel = fakeChannel({ id: 'cX', channelPerms: perms(VIEW) });
+    const client = fakeClient({ cache: { cX: refChannel } });
+    const resolveReference = async (channelId: string, messageId: string) => {
+      try {
+        return await fetchMessage(client, 'u1', channelId, messageId);
+      } catch {
+        return null;
+      }
+    };
+    const msg = fakeMessage({ reference: { messageId: 'm2', channelId: 'cX', guildId: 'g1', type: 0 } });
+    const out = (await formatMessageFull(msg, ALLOW, resolveReference)) as { reference: Record<string, unknown> };
+    assert.equal(out.reference.messageId, 'm2');
+    assert.equal(out.reference.author, undefined);
+    assert.equal(out.reference.content, undefined);
   });
 });
