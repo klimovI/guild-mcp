@@ -48,10 +48,11 @@ export function registerGetAttachment(server: McpServer, deps: ToolDeps): void {
     'get_attachment',
     {
       description:
-        'Fetch an attachment\'s actual content, not just its url: images come back viewable, text ' +
-        'files as text (no OCR or document parsing; files over ' +
-        `${MAX_BYTES / (1024 * 1024)}MB or binary return metadata only). Identify the message by ` +
-        'channelId + messageId, then pass attachmentId from its attachments[].',
+        'Fetch an attachment\'s content (not just its url): images viewable, text as text ' +
+        `(no OCR/parsing); files over ${MAX_BYTES / (1024 * 1024)}MB or binary return metadata ` +
+        'only. Identify via ' +
+        'channelId + messageId + a current attachmentId from a fresh get_message (attachments[] ' +
+        'or forwardedMessages[].attachments[]); stale ids may not match, esp. forwarded.',
       inputSchema: {
         channelId: z.string().describe('Channel id the message is in.'),
         messageId: z.string().describe('Message id.'),
@@ -70,7 +71,10 @@ export function registerGetAttachment(server: McpServer, deps: ToolDeps): void {
         return fetchErrorResult(e, `Failed to fetch message ${args.messageId} in channel ${args.channelId}`);
       }
       if (!attachment) {
-        return errorResult(`Attachment ${args.attachmentId} not found in message ${args.messageId}.`);
+        return errorResult(
+          `Attachment ${args.attachmentId} not found in message ${args.messageId}. ` +
+            'Re-fetch get_message for a current attachmentId (forwarded ids can change).',
+        );
       }
 
       const meta = {
