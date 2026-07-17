@@ -66,16 +66,6 @@ export interface SearchHit {
 }
 
 export interface SearchResult {
-  hasMore: boolean;
-  messages: SearchHit[];
-}
-
-// Внутренний результат guild-запроса (до per-user фильтра). total_results наружу НЕ отдаём: он посчитан
-// «за бота» и может считать матчи из недоступных вызвавшему приватных тредов. pageSize — сколько hit-групп
-// Discord вернул на странице (offset пагинирует по странице Discord, не по нашему отфильтрованному набору).
-interface GuildSearchResult {
-  totalResults: number;
-  pageSize: number;
   messages: SearchHit[];
 }
 
@@ -97,7 +87,6 @@ interface RawMessage {
 
 interface RawSearchResponse {
   messages?: RawMessage[][]; // группы контекста; матч помечен hit:true
-  total_results?: number;
 }
 
 function formatHit(m: RawMessage, guildId: string): SearchHit {
@@ -165,7 +154,7 @@ async function searchChunk(
   guildId: string,
   channelIds: string[],
   params: SearchParams,
-): Promise<GuildSearchResult> {
+): Promise<SearchHit[]> {
   const qs = buildQuery(params, channelIds);
   // discord.js REST manager сам держит rate-limit-бакеты и honor'ит retry_after. queueRequest
   // (в отличие от .get) отдаёт сырой ответ со status: нужно отличить 202 «индекс не готов»
@@ -181,15 +170,14 @@ async function searchChunk(
     );
   }
   const body = (await res.json()) as RawSearchResponse;
-  const groups = body.messages ?? [];
   const hits: SearchHit[] = [];
-  for (const group of groups) {
+  for (const group of body.messages ?? []) {
     const m = group.find((x) => x.hit) ?? group[0];
     if (!m) continue;
     const hit = formatHit(m, guildId);
     if (passesGuard(hit, params)) hits.push(hit);
   }
-  return { totalResults: body.total_results ?? 0, pageSize: groups.length, messages: hits };
+  return hits;
 }
 
 // Поиск в одной guild: чанкует channel_id (если их > MAX_CHANNELS) и мёржит результаты чанков.
@@ -198,25 +186,20 @@ async function searchGuild(
   guildId: string,
   channelIds: string[],
   params: SearchParams,
-): Promise<GuildSearchResult> {
+): Promise<SearchHit[]> {
   const chunks = chunk(channelIds, MAX_CHANNELS);
   if (chunks.length === 1) return searchChunk(client, guildId, chunks[0], params);
 
   const seen = new Set<string>();
   const messages: SearchHit[] = [];
-  let totalResults = 0;
-  let pageSize = 0;
   for (const set of chunks) {
-    const res = await searchChunk(client, guildId, set, params);
-    totalResults += res.totalResults; // наборы каналов не пересекаются
-    pageSize += res.pageSize;
-    for (const hit of res.messages) {
-      if (seen.has(hit.id)) continue;
+    for (const hit of await searchChunk(client, guildId, set, params)) {
+      if (seen.has(hit.id)) continue; // дедуп: один hit не должен попасть дважды
       seen.add(hit.id);
       messages.push(hit);
     }
   }
-  return { totalResults, pageSize, messages };
+  return messages;
 }
 
 // Видимые вызвавшему каналы, сгруппированные по guild.
@@ -233,7 +216,7 @@ function groupByGuild(channels: GuildBasedChannel[]): Map<string, string[]> {
 // search_messages backend: ищет по каждой обслуживаемой guild, где состоит вызвавший,
 // ограничивая область его видимыми каналами. Мёржит результаты нескольких guild.
 // В single-guild (типовой случай) — чистый passthrough порядка Discord; при мульти-guild
-// общий порядок по времени (relevance между guild несравним). Наружу — только видимые hits и hasMore.
+// общий порядок по времени (relevance между guild несравим). Наружу — только видимые вызвавшему hits.
 export async function search(client: Client, userId: string, params: SearchParams): Promise<SearchResult> {
   const visible = await visibleChannelsForUser(client, userId);
   const byGuild = groupByGuild(visible);
@@ -263,12 +246,12 @@ export async function search(client: Client, userId: string, params: SearchParam
   // Ограничение одним каналом: оставляем только его guild и только его id.
   if (params.channelId) {
     const owner = visible.find((c) => c.id === params.channelId);
-    if (!owner) return { hasMore: false, messages: [] }; // канал не виден — fail closed
+    if (!owner) return { messages: [] }; // канал не виден — fail closed
     byGuild.clear();
     byGuild.set(owner.guildId, [params.channelId]);
   }
 
-  if (byGuild.size === 0) return { hasMore: false, messages: [] };
+  if (byGuild.size === 0) return { messages: [] };
 
   // offset достоверен лишь при одном HTTP-запросе (одна guild, один чанк ≤ MAX_CHANNELS).
   const totalRequests = [...byGuild.values()].reduce(
@@ -282,35 +265,22 @@ export async function search(client: Client, userId: string, params: SearchParam
     );
   }
 
-  // hasMore честен в обе стороны: true, если у индекса Discord есть матчи за отданной страницей ИЛИ
-  // видимых после фильтра больше лимита и часть срезана — без второго условия срезанные молча пропали
-  // бы под «hasMore: false» (offset при мульти-запросе недоступен). Наружу идёт только флаг, не число.
-  const finalize = async (
-    totalResults: number,
-    pageSize: number,
-    hits: SearchHit[],
-  ): Promise<SearchResult> => {
-    const visible = await scoped(hits);
-    const messages = visible.slice(0, params.limit);
-    const hasMore = visible.length > params.limit || totalResults > (params.offset ?? 0) + pageSize;
-    return { hasMore, messages };
-  };
+  // Публичный ответ — только видимые вызвавшему hits, срезанные до лимита. Счётчик наружу не отдаём:
+  // сигнал «есть ещё» агент выводит сам из полноты страницы (messages.length === limit), не из
+  // bot-scoped total, который считал бы недоступные пользователю приватные треды.
+  const page = async (hits: SearchHit[]): Promise<SearchResult> => ({
+    messages: (await scoped(hits)).slice(0, params.limit),
+  });
 
   if (byGuild.size === 1) {
     const [[guildId, channelIds]] = [...byGuild];
-    const res = await searchGuild(client, guildId, channelIds, params);
-    return finalize(res.totalResults, res.pageSize, res.messages);
+    return page(await searchGuild(client, guildId, channelIds, params));
   }
 
-  let totalResults = 0;
-  let pageSize = 0;
   const merged: SearchHit[] = [];
   for (const [guildId, channelIds] of byGuild) {
-    const res = await searchGuild(client, guildId, channelIds, params);
-    totalResults += res.totalResults;
-    pageSize += res.pageSize;
-    merged.push(...res.messages);
+    merged.push(...(await searchGuild(client, guildId, channelIds, params)));
   }
   merged.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
-  return finalize(totalResults, pageSize, merged);
+  return page(merged);
 }

@@ -28,6 +28,18 @@ export function findAttachment(msg: Message<true>, attachmentId: string): Attach
   );
 }
 
+// Ищем вложение, при промахе один раз перечитав сообщение из REST (force): холодный/конкурентный
+// кэш discord.js порой отдаёт объект без полностью загруженных messageSnapshots, и вложение форварда
+// «пропадает». Обычный путь остаётся на кэше — лишний REST только при промахе.
+export async function resolveAttachment(
+  fetchMsg: (force: boolean) => Promise<Message<true>>,
+  attachmentId: string,
+): Promise<Attachment | undefined> {
+  const cached = findAttachment(await fetchMsg(false), attachmentId);
+  if (cached) return cached;
+  return findAttachment(await fetchMsg(true), attachmentId);
+}
+
 // get_attachment — отдать САМО вложение, а не только ссылку: картинку как image-контент (Claude
 // её видит), текстовый файл как текст. Гейтинг через сообщение (channelId+messageId), НЕ через
 // голый URL — иначе подписанный CDN-URL обходил бы проверку доступа.
@@ -50,8 +62,10 @@ export function registerGetAttachment(server: McpServer, deps: ToolDeps): void {
       const caller = callerFromAuth(extra.authInfo);
       let attachment;
       try {
-        const msg = await fetchMessage(deps.discord, caller.userId, args.channelId, args.messageId);
-        attachment = findAttachment(msg, args.attachmentId);
+        attachment = await resolveAttachment(
+          (force) => fetchMessage(deps.discord, caller.userId, args.channelId, args.messageId, force),
+          args.attachmentId,
+        );
       } catch (e) {
         return fetchErrorResult(e, `Failed to fetch message ${args.messageId} in channel ${args.channelId}`);
       }
