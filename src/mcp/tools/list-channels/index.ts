@@ -1,9 +1,11 @@
 import { ChannelType, type GuildBasedChannel } from 'discord.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { callerFromAuth } from '../../auth/session.js';
-import { visibleChannelsForUser } from '../../discord/permissions.js';
-import type { ToolDeps } from '../server.js';
-import { jsonResult } from './shared.js';
+import { callerFromAuth } from '../../../auth/session.js';
+import { visibleChannelsForUser } from '../../../discord/permissions.js';
+import type { ChannelListItem } from '../../entities/channel.js';
+import type { ToolDeps } from '../../server.js';
+import { structuredResult } from '../shared.js';
+import { definition, outputSchema } from './schema.js';
 
 // Имя объемлющей категории. Для обычного канала parent — сама категория; для треда parent —
 // его текст-канал, а категория — на уровень выше. null, если канал вне категории.
@@ -19,25 +21,20 @@ function categoryNameOf(ch: GuildBasedChannel): string | null {
 export function registerListChannels(server: McpServer, deps: ToolDeps): void {
   server.registerTool(
     'list_channels',
-    {
-      description:
-        'Channels you may see across all your servers. parentId is the immediate parent (category ' +
-        'for a channel, parent channel for a thread); categoryName is the enclosing category — ' +
-        'group by it to navigate.',
-    },
-    async (extra) => {
+    definition,
+    async (_args, extra) => {
       const caller = callerFromAuth(extra.authInfo);
       const channels = await visibleChannelsForUser(deps.discord, caller.userId);
-      const list = channels.map((c) => ({
+      const list: ChannelListItem[] = channels.map((c) => ({
         id: c.id,
-        name: c.name,
         guildId: c.guildId,
         guildName: c.guild.name,
+        name: c.name,
         type: ChannelType[c.type] ?? c.type,
         parentId: c.parentId ?? null,
         categoryName: categoryNameOf(c),
       }));
-      return jsonResult(list);
+      return structuredResult(outputSchema, { channels: list });
     },
   );
 }

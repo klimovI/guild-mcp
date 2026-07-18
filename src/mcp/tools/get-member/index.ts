@@ -1,30 +1,23 @@
-import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { callerFromAuth } from '../../auth/session.js';
-import { callerGuilds } from '../../discord/permissions.js';
-import type { ToolDeps } from '../server.js';
-import { errorResult, jsonResult } from './shared.js';
+import { callerFromAuth } from '../../../auth/session.js';
+import { callerGuilds } from '../../../discord/permissions.js';
+import type { MemberOutput } from '../../entities/member.js';
+import type { ToolDeps } from '../../server.js';
+import { errorResult, structuredResult } from '../shared.js';
+import { definition, outputSchema } from './schema.js';
 
 // get_member — резолв Discord user id → профиль + членство, ТОЛЬКО в гильдиях, которые вызвавший
 // делит с целью (не течём состав серверов, где вызвавшего нет). Прослойка к GET /guilds/{id}/members/{id}.
 export function registerGetMember(server: McpServer, deps: ToolDeps): void {
   server.registerTool(
     'get_member',
-    {
-      description:
-        'Resolve a Discord user id to their profile and per-server membership (nickname, roles, ' +
-        'joinedAt), only for servers you share with them. Use it to identify a message author or mention.',
-      inputSchema: {
-        userId: z.string().describe('Discord user id.'),
-        guildId: z.string().optional().describe('Restrict to one server id.'),
-      },
-    },
+    definition,
     async (args, extra) => {
       const caller = callerFromAuth(extra.authInfo);
       const guilds = await callerGuilds(deps.discord, caller.userId, args.guildId);
 
-      let profile: Record<string, unknown> | null = null;
-      const memberships: Record<string, unknown>[] = [];
+      let profile: Omit<MemberOutput, 'memberships'> | null = null;
+      const memberships: MemberOutput['memberships'] = [];
       for (const guild of guilds) {
         let target;
         try {
@@ -54,7 +47,8 @@ export function registerGetMember(server: McpServer, deps: ToolDeps): void {
       if (!profile) {
         return errorResult(`User ${args.userId} is not a member of any server you share.`);
       }
-      return jsonResult({ ...profile, memberships });
+      const result: MemberOutput = { ...profile, memberships };
+      return structuredResult(outputSchema, result);
     },
   );
 }

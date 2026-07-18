@@ -1,10 +1,11 @@
 import { ChannelType } from 'discord.js';
-import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { callerFromAuth } from '../../auth/session.js';
-import { canUserViewChannel } from '../../discord/permissions.js';
-import type { ToolDeps } from '../server.js';
-import { errorResult, jsonResult } from './shared.js';
+import { callerFromAuth } from '../../../auth/session.js';
+import { canUserViewChannel } from '../../../discord/permissions.js';
+import type { ChannelOutput } from '../../entities/channel.js';
+import type { ToolDeps } from '../../server.js';
+import { errorResult, structuredResult } from '../shared.js';
+import { definition, outputSchema } from './schema.js';
 
 // get_channel — метаданные канала/треда (прослойка к GET /channels/{id}). Для навигации по цепочке
 // диалога: тред указывает на родительский канал (parentId) и стартовое сообщение (starterMessageId,
@@ -12,15 +13,7 @@ import { errorResult, jsonResult } from './shared.js';
 export function registerGetChannel(server: McpServer, deps: ToolDeps): void {
   server.registerTool(
     'get_channel',
-    {
-      description:
-        'Metadata for a channel or thread: type, name, topic, parentId. A thread also has owner, ' +
-        'archive state, and starterMessageId (equals the thread id) — the message it grew from, to ' +
-        'walk a conversation back to its start.',
-      inputSchema: {
-        channelId: z.string().describe('Channel or thread id.'),
-      },
-    },
+    definition,
     async (args, extra) => {
       const caller = callerFromAuth(extra.authInfo);
       const allowed = await canUserViewChannel(deps.discord, caller.userId, args.channelId);
@@ -31,11 +24,11 @@ export function registerGetChannel(server: McpServer, deps: ToolDeps): void {
         return errorResult(`Channel ${args.channelId} is not a guild channel.`);
       }
 
-      const meta: Record<string, unknown> = {
+      const meta: ChannelOutput = {
         id: channel.id,
-        type: ChannelType[channel.type] ?? channel.type,
-        name: channel.name,
         guildId: channel.guildId,
+        name: channel.name,
+        type: ChannelType[channel.type] ?? channel.type,
         parentId: channel.parentId, // тред → родительский канал; канал → категория
       };
       if ('topic' in channel) meta.topic = channel.topic;
@@ -52,7 +45,7 @@ export function registerGetChannel(server: McpServer, deps: ToolDeps): void {
         meta.messageCount = channel.messageCount;
         meta.memberCount = channel.memberCount;
       }
-      return jsonResult(meta);
+      return structuredResult(outputSchema, { channel: meta });
     },
   );
 }

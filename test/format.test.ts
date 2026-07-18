@@ -61,6 +61,7 @@ describe('formatMessageCompact — упоминания каналов и тре
     assert.equal(out.mentions.channels[0].id, 'c9');
     assert.equal(out.mentions.channels[0].name, 'secret');
     assert.equal(out.cleanContent, 'see #secret now');
+    assert.equal('content' in out, false);
   });
 
   it('имя треда (msg.thread — всегда публичный) отдаётся как есть', () => {
@@ -93,6 +94,8 @@ describe('formatMessageFull — гейтинг превью процитиров
     const out = (await formatMessageFull(msg(), RESOLVE_TARGET)) as { reference: Record<string, unknown> };
     assert.equal(out.reference.author, 'Ann');
     assert.equal(out.reference.content, 'quoted text');
+    assert.equal('content' in out, true);
+    assert.equal('cleanContent' in out, true);
   });
 });
 

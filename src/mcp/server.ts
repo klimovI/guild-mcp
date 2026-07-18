@@ -2,17 +2,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Client } from 'discord.js';
 import type { Config } from '../config.js';
 import type { DB } from '../db/db.js';
-import { SERVER_INSTRUCTIONS } from './instructions.js';
-import { registerGetAttachment } from './tools/get-attachment.js';
-import { registerGetChannel } from './tools/get-channel.js';
-import { registerGetMember } from './tools/get-member.js';
-import { registerGetMessage } from './tools/get-message.js';
-import { registerGetMessages } from './tools/get-messages.js';
-import { registerGetPinned } from './tools/get-pinned.js';
-import { registerListChannels } from './tools/list-channels.js';
-import { registerListThreads } from './tools/list-threads.js';
-import { registerSearchMembers } from './tools/search-members.js';
-import { registerSearchMessages } from './tools/search-messages.js';
+import { registerGetAttachment } from './tools/get-attachment/index.js';
+import { registerGetChannel } from './tools/get-channel/index.js';
+import { registerGetMember } from './tools/get-member/index.js';
+import { registerGetMessage } from './tools/get-message/index.js';
+import { registerGetMessages } from './tools/get-messages/index.js';
+import { registerGetPinned } from './tools/get-pinned/index.js';
+import { registerListChannels } from './tools/list-channels/index.js';
+import { registerListThreads } from './tools/list-threads/index.js';
+import { registerSearchMembers } from './tools/search-members/index.js';
+import { registerSearchMessages } from './tools/search-messages/index.js';
 
 // Общие зависимости тулов. Идентичность вызвавшего берётся per-request из проверенного
 // OAuth-токена (extra.authInfo), не из аргументов тула.
@@ -28,10 +27,7 @@ export interface ToolDeps {
 }
 
 export function createMcpServer(deps: ToolDeps): McpServer {
-  const server = new McpServer(
-    { name: 'guild-mcp', version: '0.1.0' },
-    { instructions: SERVER_INSTRUCTIONS },
-  );
+  const server = new McpServer({ name: 'guild-mcp', version: '0.1.0' });
   registerSearchMessages(server, deps);
   registerGetMessages(server, deps);
   registerGetMessage(server, deps);

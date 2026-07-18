@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Attachment, Message } from 'discord.js';
-import { findAttachment } from '../src/mcp/tools/get-attachment.js';
+import { findAttachment } from '../src/mcp/tools/get-attachment/index.js';
 
 // Гейт доступа к каналу — на уровне fetchMessage (messages.test.ts); здесь только поиск вложения.
 

@@ -34,15 +34,16 @@ export interface SearchParams {
   maxId?: string; // snowflake — сообщения старше
   sortBy?: 'relevance' | 'timestamp';
   sortOrder?: 'asc' | 'desc';
-  offset?: number;
   limit: number; // ≤ 25 (потолок страницы Discord)
+  offset?: number;
 }
 
 export interface SearchHit {
   id: string;
-  channelId: string;
   guildId: string;
+  channelId: string;
   url: string;
+  content: string;
   author: {
     id: string | null;
     username: string | null;
@@ -50,11 +51,10 @@ export interface SearchHit {
     bot: boolean;
     webhookId: string | null;
   };
-  content: string;
   createdAt: string;
   editedAt: string | null;
-  pinned: boolean;
   type: string; // имя enum MessageType
+  pinned: boolean;
   attachments: {
     id: string;
     name: string;
@@ -92,9 +92,10 @@ interface RawSearchResponse {
 function formatHit(m: RawMessage, guildId: string): SearchHit {
   return {
     id: m.id,
-    channelId: m.channel_id,
     guildId,
+    channelId: m.channel_id,
     url: `https://discord.com/channels/${guildId}/${m.channel_id}/${m.id}`,
+    content: m.content ?? '',
     author: {
       id: m.author?.id ?? null,
       username: m.author?.username ?? null,
@@ -102,11 +103,10 @@ function formatHit(m: RawMessage, guildId: string): SearchHit {
       bot: m.author?.bot ?? false,
       webhookId: m.webhook_id ?? null,
     },
-    content: m.content ?? '',
     createdAt: m.timestamp,
     editedAt: m.edited_timestamp ?? null,
-    pinned: m.pinned ?? false,
     type: m.type !== undefined ? (MessageType[m.type] ?? String(m.type)) : 'Unknown',
+    pinned: m.pinned ?? false,
     attachments: (m.attachments ?? []).map((a) => ({
       id: a.id,
       name: a.filename ?? '',

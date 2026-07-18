@@ -1,21 +1,16 @@
-import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { callerFromAuth } from '../../auth/session.js';
-import { fetchPinned } from '../../discord/messages.js';
-import type { ToolDeps } from '../server.js';
-import { fetchErrorResult, formatCompactList, jsonResult } from './shared.js';
+import { callerFromAuth } from '../../../auth/session.js';
+import { fetchPinned } from '../../../discord/messages.js';
+import type { ToolDeps } from '../../server.js';
+import { fetchErrorResult, formatCompactList, structuredResult } from '../shared.js';
+import { definition, outputSchema } from './schema.js';
 
 // get_pinned — закреплённые сообщения канала (прослойка к GET /channels/{id}/pins).
 // Тот же гейтинг по видимости канала, что и у get_messages.
 export function registerGetPinned(server: McpServer, deps: ToolDeps): void {
   server.registerTool(
     'get_pinned',
-    {
-      description: 'Pinned messages of a channel, as compact cards.',
-      inputSchema: {
-        channelId: z.string().describe('Channel id.'),
-      },
-    },
+    definition,
     async (args, extra) => {
       const caller = callerFromAuth(extra.authInfo);
       let pinned;
@@ -24,7 +19,7 @@ export function registerGetPinned(server: McpServer, deps: ToolDeps): void {
       } catch (e) {
         return fetchErrorResult(e, 'Failed to fetch pinned messages');
       }
-      return jsonResult(formatCompactList(pinned));
+      return structuredResult(outputSchema, { messages: formatCompactList(pinned) });
     },
   );
 }

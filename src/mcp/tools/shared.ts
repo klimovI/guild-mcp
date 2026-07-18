@@ -1,4 +1,5 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import {
   type Embed,
   type Message,
@@ -9,6 +10,7 @@ import {
   StickerFormatType,
 } from 'discord.js';
 import { MessageAccessError } from '../../discord/messages.js';
+import type { CompactMessage, FullMessage, MessageCommon } from '../entities/message.js';
 
 // before/after/around у get_messages и min_id/max_id у search принимаем в двух формах:
 // ISO 8601-время ЛИБО сырой snowflake message id. Discord ждёт snowflake — ISO минтим по timestamp.
@@ -28,7 +30,7 @@ function truncate(s: string | null, n: number): string | null {
 // Поля, одинаковые для компактного (get_messages) и полного (get_message) вида. Имена упомянутых
 // каналов и тред отдаём как есть: Discord показывает их всем зрителям сообщения (msg.thread бывает
 // только у публичного треда, видимого любому, кто видит канал; доступ проверяется лишь при переходе).
-function base(msg: Message<true>): Record<string, unknown> {
+function base(msg: Message<true>): MessageCommon {
   const channels = [...msg.mentions.channels.values()].map((c) => ({
     id: c.id,
     name: 'name' in c ? c.name : null,
@@ -36,8 +38,8 @@ function base(msg: Message<true>): Record<string, unknown> {
   const threadName = msg.thread?.name ?? null;
   return {
     id: msg.id,
-    channelId: msg.channelId,
     guildId: msg.guildId,
+    channelId: msg.channelId,
     url: msg.url,
     author: {
       id: msg.author.id,
@@ -48,8 +50,6 @@ function base(msg: Message<true>): Record<string, unknown> {
       bot: msg.author.bot,
       webhookId: msg.webhookId ?? null,
     },
-    content: msg.content,
-    cleanContent: msg.cleanContent, // mentions/каналы/эмодзи резолвнуты в читаемый вид
     createdAt: new Date(msg.createdTimestamp).toISOString(),
     editedAt: msg.editedTimestamp ? new Date(msg.editedTimestamp).toISOString() : null,
     type: MessageType[msg.type] ?? msg.type,
@@ -69,14 +69,14 @@ function base(msg: Message<true>): Record<string, unknown> {
     attachments: [...msg.attachments.values()].map((a) => ({
       id: a.id,
       name: a.name,
-      url: a.url, // подписанный CDN-URL, истекает ~24ч — фетчить сразу
       contentType: a.contentType,
       size: a.size,
       width: a.width,
       height: a.height,
+      duration: a.duration, // секунды; голосовое сообщение, если не null
       description: a.description ?? null,
       spoiler: a.spoiler,
-      duration: a.duration, // секунды; голосовое сообщение, если не null
+      url: a.url, // подписанный CDN-URL, истекает ~24ч — фетчить сразу
     })),
     reactions: [...msg.reactions.cache.values()].map((r) => ({
       emoji: r.emoji.name,
@@ -103,31 +103,31 @@ function base(msg: Message<true>): Record<string, unknown> {
   };
 }
 
-function embedCompact(e: Embed): Record<string, unknown> {
+function embedCompact(e: Embed): CompactMessage['embeds'][number] {
   return {
     type: e.data.type ?? null,
     title: e.title ?? null,
-    url: e.url ?? null,
     description: truncate(e.description, 200),
     fields: e.fields.length,
+    url: e.url ?? null,
   };
 }
 
-function embedFull(e: Embed): Record<string, unknown> {
+function embedFull(e: Embed): FullMessage['embeds'][number] {
   return {
     type: e.data.type ?? null,
     title: e.title ?? null,
-    url: e.url ?? null,
     description: e.description ?? null,
     author: e.author ? { name: e.author.name, url: e.author.url ?? null } : null,
+    fields: e.fields.map((f) => ({ name: f.name, value: f.value, inline: f.inline ?? false })),
     footer: e.footer ? { text: e.footer.text } : null,
     image: e.image?.url ?? null,
     thumbnail: e.thumbnail?.url ?? null,
-    fields: e.fields.map((f) => ({ name: f.name, value: f.value, inline: f.inline ?? false })),
+    url: e.url ?? null,
   };
 }
 
-function reference(msg: Message<true>): Record<string, unknown> | null {
+function reference(msg: Message<true>): CompactMessage['reference'] {
   if (!msg.reference?.messageId) return null;
   return {
     messageId: msg.reference.messageId,
@@ -153,13 +153,13 @@ function componentLabels(msg: Message<true>): string[] {
 
 // Сводка компонентов (кнопки/селекты): счётчик + читаемые подписи/плейсхолдеры. Сырое дерево
 // компонентов — UI-плумбинг, агенту не нужно; одинаково для compact и full.
-function componentsSummary(msg: Message<true>): Record<string, unknown> | null {
+function componentsSummary(msg: Message<true>): CompactMessage['components'] {
   return msg.components.length
     ? { count: msg.components.length, labels: componentLabels(msg) }
     : null;
 }
 
-function pollSummary(msg: Message<true>): Record<string, unknown> | null {
+function pollSummary(msg: Message<true>): CompactMessage['poll'] {
   const p = msg.poll;
   if (!p) return null;
   return {
@@ -169,23 +169,23 @@ function pollSummary(msg: Message<true>): Record<string, unknown> | null {
   };
 }
 
-function pollFull(msg: Message<true>): Record<string, unknown> | null {
+function pollFull(msg: Message<true>): FullMessage['poll'] {
   const p = msg.poll;
   if (!p) return null;
   return {
     question: p.question.text,
-    expiresAt: p.expiresTimestamp ? new Date(p.expiresTimestamp).toISOString() : null,
-    resultsFinalized: p.resultsFinalized,
     answers: [...p.answers.values()].map((a) => ({
       text: 'text' in a ? a.text : null,
-      voteCount: 'voteCount' in a ? a.voteCount : null,
       emoji: a.emoji?.name ?? null,
+      voteCount: 'voteCount' in a ? a.voteCount : null,
     })),
+    expiresAt: p.expiresTimestamp ? new Date(p.expiresTimestamp).toISOString() : null,
+    resultsFinalized: p.resultsFinalized,
   };
 }
 
 // Пересланные (forward) сообщения: реальное содержимое — в snapshot, у самого msg content пуст.
-function forwardsSummary(msg: Message<true>): Record<string, unknown>[] {
+function forwardsSummary(msg: Message<true>): CompactMessage['forwardedMessages'] {
   return [...msg.messageSnapshots.values()].map((s) => ({
     content: truncate(s.content ?? null, 200),
     attachments: s.attachments.size,
@@ -194,7 +194,7 @@ function forwardsSummary(msg: Message<true>): Record<string, unknown>[] {
   }));
 }
 
-function forwardsFull(msg: Message<true>): Record<string, unknown>[] {
+function forwardsFull(msg: Message<true>): FullMessage['forwardedMessages'] {
   return [...msg.messageSnapshots.values()].map((s) => ({
     type: MessageType[s.type] ?? s.type,
     content: s.content,
@@ -202,8 +202,8 @@ function forwardsFull(msg: Message<true>): Record<string, unknown>[] {
     attachments: [...s.attachments.values()].map((a) => ({
       id: a.id,
       name: a.name,
-      url: a.url,
       contentType: a.contentType,
+      url: a.url,
     })),
     embeds: s.embeds.map(embedCompact),
     stickers: [...s.stickers.values()].map((st) => ({ id: st.id, name: st.name })),
@@ -211,15 +211,16 @@ function forwardsFull(msg: Message<true>): Record<string, unknown>[] {
 }
 
 // Список компактных карточек (get_messages/get_pinned): только guild-сообщения.
-export function formatCompactList(messages: Iterable<Message>): Record<string, unknown>[] {
+export function formatCompactList(messages: Iterable<Message>): CompactMessage[] {
   return [...messages].filter((m): m is Message<true> => m.inGuild()).map(formatMessageCompact);
 }
 
 // get_messages — список истории: эмбеды/пересланное/опрос сводкой (иначе payload раздувается),
 // reply — только ids (без доп-запроса за процитированным).
-export function formatMessageCompact(msg: Message<true>): Record<string, unknown> {
+export function formatMessageCompact(msg: Message<true>): CompactMessage {
   return {
     ...base(msg),
+    cleanContent: msg.cleanContent,
     embeds: msg.embeds.map(embedCompact),
     reference: reference(msg),
     poll: pollSummary(msg),
@@ -236,7 +237,7 @@ export type ReferenceResolver = (channelId: string, messageId: string) => Promis
 export async function formatMessageFull(
   msg: Message<true>,
   resolveReference: ReferenceResolver,
-): Promise<Record<string, unknown>> {
+): Promise<FullMessage> {
   let ref = reference(msg);
   // Процитированное резолвим через resolveReference — reply может ссылаться на другой канал.
   const refChannelId = msg.reference?.channelId;
@@ -253,6 +254,8 @@ export async function formatMessageFull(
   }
   return {
     ...base(msg),
+    content: msg.content,
+    cleanContent: msg.cleanContent,
     embeds: msg.embeds.map(embedFull),
     reference: ref,
     poll: pollFull(msg),
@@ -261,16 +264,34 @@ export async function formatMessageFull(
   };
 }
 
-export function jsonResult(data: unknown): CallToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+export function structuredResult<S extends z.ZodType>(
+  schema: S,
+  data: NoInfer<z.output<S>>,
+): CallToolResult {
+  return { content: [], structuredContent: schema.parse(data) as Record<string, unknown> };
 }
 
-export function textResult(text: string): CallToolResult {
-  return { content: [{ type: 'text', text }] };
+export function textResult<S extends z.ZodType>(
+  text: string,
+  schema: S,
+  data: NoInfer<z.output<S>>,
+): CallToolResult {
+  return {
+    content: [{ type: 'text', text }],
+    structuredContent: schema.parse(data) as Record<string, unknown>,
+  };
 }
 
-export function imageResult(dataBase64: string, mimeType: string): CallToolResult {
-  return { content: [{ type: 'image', data: dataBase64, mimeType }] };
+export function imageResult<S extends z.ZodType>(
+  dataBase64: string,
+  mimeType: string,
+  schema: S,
+  data: NoInfer<z.output<S>>,
+): CallToolResult {
+  return {
+    content: [{ type: 'image', data: dataBase64, mimeType }],
+    structuredContent: schema.parse(data) as Record<string, unknown>,
+  };
 }
 
 export function errorResult(message: string): CallToolResult {

@@ -1,29 +1,27 @@
 import type { AnyThreadChannel } from 'discord.js';
-import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { callerFromAuth } from '../../auth/session.js';
-import { canUserView, canUserViewChannel } from '../../discord/permissions.js';
-import type { ToolDeps } from '../server.js';
-import { errorResult, jsonResult } from './shared.js';
+import { callerFromAuth } from '../../../auth/session.js';
+import { canUserView, canUserViewChannel } from '../../../discord/permissions.js';
+import type { ThreadOutput } from '../../entities/channel.js';
+import type { ToolDeps } from '../../server.js';
+import { errorResult, structuredResult } from '../shared.js';
+import { DEFAULT_LIMIT, definition, outputSchema } from './schema.js';
 
-const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 100;
-
-function threadMeta(t: AnyThreadChannel): Record<string, unknown> {
+function threadMeta(t: AnyThreadChannel): ThreadOutput {
   return {
     id: t.id,
-    name: t.name,
     parentId: t.parentId, // канал, из которого ответвился тред
+    name: t.name,
     ownerId: t.ownerId,
+    createdAt: t.createdTimestamp ? new Date(t.createdTimestamp).toISOString() : null,
     archived: t.archived,
     // archivedAt — курсор пагинации архивных: передай самый старый из выдачи как before.
     // Только для реально архивных (у активных Discord тоже держит archiveTimestamp — не путаем).
     archivedAt: t.archived && t.archiveTimestamp ? new Date(t.archiveTimestamp).toISOString() : null,
     locked: t.locked,
+    autoArchiveDuration: t.autoArchiveDuration,
     messageCount: t.messageCount,
     memberCount: t.memberCount,
-    createdAt: t.createdTimestamp ? new Date(t.createdTimestamp).toISOString() : null,
-    autoArchiveDuration: t.autoArchiveDuration,
   };
 }
 
@@ -35,27 +33,13 @@ function threadMeta(t: AnyThreadChannel): Record<string, unknown> {
 export function registerListThreads(server: McpServer, deps: ToolDeps): void {
   server.registerTool(
     'list_threads',
-    {
-      description:
-        'Threads you may see. With channelId: that channel/forum\'s active + public archived ' +
-        'threads; page older archived by passing the oldest returned archivedAt as before ' +
-        '(hasMore = more remain; limit ≤100, default 50). Without channelId: active threads across ' +
-        'your servers. Returns { threads, hasMore }; read one with get_messages(channelId=thread id).',
-      inputSchema: {
-        channelId: z
-          .string()
-          .optional()
-          .describe('Parent channel/forum id. Omit for active threads across all servers.'),
-        before: z
-          .string()
-          .optional()
-          .describe('Page archived threads older than this archive timestamp (ISO 8601). Use with channelId.'),
-        limit: z.number().int().min(1).max(MAX_LIMIT).optional().describe('Max archived per page (default 50).'),
-      },
-    },
+    definition,
     async (args, extra) => {
       const caller = callerFromAuth(extra.authInfo);
       const limit = args.limit ?? DEFAULT_LIMIT;
+      if (args.before !== undefined && args.channelId === undefined) {
+        return errorResult('before requires channelId.');
+      }
       if (args.before !== undefined && Number.isNaN(Date.parse(args.before))) {
         return errorResult(`Invalid before "${args.before}" (expected ISO 8601 timestamp).`);
       }
@@ -90,7 +74,7 @@ export function registerListThreads(server: McpServer, deps: ToolDeps): void {
       for (const t of collected) {
         if (await canUserView(deps.discord, caller.userId, t.id)) visible.push(t);
       }
-      return jsonResult({ threads: visible.map(threadMeta), hasMore });
+      return structuredResult(outputSchema, { threads: visible.map(threadMeta), hasMore });
     },
   );
 }
