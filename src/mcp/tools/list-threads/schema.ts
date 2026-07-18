@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { threadSchema } from '../../entities/channel.js';
+import { READ_ONLY_TOOL_ANNOTATIONS } from '../annotations.js';
 
 export const DEFAULT_LIMIT = 50;
 export const MAX_LIMIT = 100;
@@ -13,9 +14,11 @@ export const inputSchema = z.object({
 });
 export const outputSchema = z.object({ threads: z.array(threadSchema), hasMore: z.boolean() }).strict();
 export const definition = {
+  title: 'List threads',
   description: 'List active threads across servers, or active and public archived threads in one parent.',
   inputSchema,
   outputSchema,
+  annotations: READ_ONLY_TOOL_ANNOTATIONS,
 };
 export type Input = z.input<typeof inputSchema>;
 export type Output = z.output<typeof outputSchema>;

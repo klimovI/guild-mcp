@@ -87,6 +87,15 @@ export function registerGetAttachment(server: McpServer, deps: ToolDeps): void {
           attachment: { ...meta, delivery: 'metadata', note: `fetch failed: ${(e as Error).message}` },
         });
       }
+      if (buf.length > MAX_BYTES) {
+        return structuredResult(outputSchema, {
+          attachment: {
+            ...meta,
+            delivery: 'metadata',
+            note: `actual download too large to inline (> ${MAX_BYTES} bytes)`,
+          },
+        });
+      }
 
       if (isImage) {
         return imageResult(

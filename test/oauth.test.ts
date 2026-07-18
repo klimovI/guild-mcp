@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
 import {
   InvalidGrantError,
+  InvalidTargetError,
   InvalidTokenError,
   TemporarilyUnavailableError,
 } from '@modelcontextprotocol/sdk/server/auth/errors.js';
@@ -15,6 +16,8 @@ import * as store from '../src/db/oauth.repo.js';
 import { config, fakeClient, fakeGuild } from './helpers.js';
 
 const CLIENT = { client_id: 'c1' } as OAuthClientInformationFull;
+const RESOURCE = new URL('https://example.test/mcp');
+const validToken = { scopes: [], resource: RESOURCE.href } as const;
 const future = () => Date.now() + 1_000_000;
 const past = () => Date.now() - 1_000;
 
@@ -38,7 +41,7 @@ describe('токены хранятся хэшом (SHA-256), не в откры
   it('oauth_tokens.token = SHA-256(raw), lookup по raw работает', () => {
     const { db } = newProvider();
     const raw = 'super-secret-access';
-    store.saveToken(db, raw, { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
+    store.saveToken(db, raw, { discordUserId: 'u1', clientId: 'c1', expiresAt: future(), ...validToken });
     const row = db.prepare('SELECT token_hash FROM oauth_tokens').get() as { token_hash: string };
     assert.equal(row.token_hash, createHash('sha256').update(raw).digest('base64url'));
     assert.notEqual(row.token_hash, raw);
@@ -61,8 +64,9 @@ describe('токены хранятся хэшом (SHA-256), не в откры
     store.saveToken(db, 'acc-raw', {
       discordUserId: 'u1',
       clientId: 'c1',
-      scopes: ['identify'],
+      scopes: [],
       expiresAt: future(),
+      resource: RESOURCE.href,
     });
     const info = await provider.verifyAccessToken('acc-raw');
     assert.equal(info.extra?.discordUserId, 'u1');
@@ -74,7 +78,7 @@ describe('exchangeRefreshToken — rotation + TTL + гейт членства', 
   it('rotation: старый refresh инвалидируется, выдаётся новый', async () => {
     const { provider, db } = newProvider(true);
     store.saveRefresh(db, 'old-refresh', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
-    const toks = await provider.exchangeRefreshToken(CLIENT, 'old-refresh');
+    const toks = await provider.exchangeRefreshToken(CLIENT, 'old-refresh', undefined, RESOURCE);
     assert.ok(toks.refresh_token && toks.refresh_token !== 'old-refresh');
     assert.equal(store.getRefresh(db, 'old-refresh'), undefined); // одноразовый
     assert.ok(store.getRefresh(db, toks.refresh_token as string)); // новый персистнут
@@ -85,8 +89,8 @@ describe('exchangeRefreshToken — rotation + TTL + гейт членства', 
     const { provider, db } = newProvider(true);
     store.saveRefresh(db, 'r', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
     const [a, b] = await Promise.allSettled([
-      provider.exchangeRefreshToken(CLIENT, 'r'),
-      provider.exchangeRefreshToken(CLIENT, 'r'),
+      provider.exchangeRefreshToken(CLIENT, 'r', undefined, RESOURCE),
+      provider.exchangeRefreshToken(CLIENT, 'r', undefined, RESOURCE),
     ]);
     const ok = [a, b].filter((x) => x.status === 'fulfilled');
     const err = [a, b].filter((x): x is PromiseRejectedResult => x.status === 'rejected');
@@ -98,29 +102,29 @@ describe('exchangeRefreshToken — rotation + TTL + гейт членства', 
 
   it('несуществующий refresh → InvalidGrantError (400 invalid_grant)', async () => {
     const { provider, db } = newProvider(true);
-    await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'nope'), InvalidGrantError);
+    await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'nope', undefined, RESOURCE), InvalidGrantError);
     db.close();
   });
 
   it('чужой client_id → InvalidGrantError', async () => {
     const { provider, db } = newProvider(true);
     store.saveRefresh(db, 'r', { discordUserId: 'u1', clientId: 'other', scopes: [], expiresAt: future() });
-    await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'r'), InvalidGrantError);
+    await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'r', undefined, RESOURCE), InvalidGrantError);
     db.close();
   });
 
   it('протухший refresh → InvalidGrantError', async () => {
     const { provider, db } = newProvider(true);
     store.saveRefresh(db, 'r', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: past() });
-    await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'r'), InvalidGrantError);
+    await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'r', undefined, RESOURCE), InvalidGrantError);
     db.close();
   });
 
   it('вышедший из всех гильдий → InvalidGrantError + отзыв всех токенов юзера', async () => {
     const { provider, db } = newProvider(false); // не член
     store.saveRefresh(db, 'r', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
-    store.saveToken(db, 'acc', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
-    await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'r'), InvalidGrantError);
+    store.saveToken(db, 'acc', { discordUserId: 'u1', clientId: 'c1', expiresAt: future(), ...validToken });
+    await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'r', undefined, RESOURCE), InvalidGrantError);
     assert.equal(store.getToken(db, 'acc'), undefined); // access отозван
     assert.equal(store.getRefresh(db, 'r'), undefined); // refresh отозван
     db.close();
@@ -129,8 +133,20 @@ describe('exchangeRefreshToken — rotation + TTL + гейт членства', 
   it('Discord недоступен → TemporarilyUnavailableError, refresh НЕ трогаем', async () => {
     const { provider, db } = newProviderUnavailable();
     store.saveRefresh(db, 'r', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
-    await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'r'), TemporarilyUnavailableError);
+    await assert.rejects(() => provider.exchangeRefreshToken(CLIENT, 'r', undefined, RESOURCE), TemporarilyUnavailableError);
     assert.ok(store.getRefresh(db, 'r')); // refresh уцелел — транзиентный сбой не разлогинивает
+    db.close();
+  });
+
+  it('требует canonical resource', async () => {
+    const { provider, db } = newProvider(true);
+    store.saveRefresh(db, 'r1', {
+      discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future(),
+    });
+    await assert.rejects(
+      () => provider.exchangeRefreshToken(CLIENT, 'r1'),
+      InvalidTargetError,
+    );
     db.close();
   });
 
@@ -139,7 +155,7 @@ describe('exchangeRefreshToken — rotation + TTL + гейт членства', 
 describe('verifyAccessToken — трёхстатусный гейт членства', () => {
   it('подтверждённый не-член → InvalidTokenError + отзыв всех токенов', async () => {
     const { provider, db } = newProvider(false);
-    store.saveToken(db, 'acc', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
+    store.saveToken(db, 'acc', { discordUserId: 'u1', clientId: 'c1', expiresAt: future(), ...validToken });
     store.saveRefresh(db, 'r', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
     await assert.rejects(() => provider.verifyAccessToken('acc'), InvalidTokenError);
     assert.equal(store.getToken(db, 'acc'), undefined);
@@ -149,9 +165,19 @@ describe('verifyAccessToken — трёхстатусный гейт членст
 
   it('Discord недоступен → TemporarilyUnavailableError, токен НЕ трогаем', async () => {
     const { provider, db } = newProviderUnavailable();
-    store.saveToken(db, 'acc', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
+    store.saveToken(db, 'acc', { discordUserId: 'u1', clientId: 'c1', expiresAt: future(), ...validToken });
     await assert.rejects(() => provider.verifyAccessToken('acc'), TemporarilyUnavailableError);
     assert.ok(store.getToken(db, 'acc')); // токен уцелел — транзиентный сбой не разлогинивает
+    db.close();
+  });
+
+  it('отклоняет access token для другого resource', async () => {
+    const { provider, db } = newProvider(true);
+    store.saveToken(db, 'acc', {
+      discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future(),
+      resource: 'https://other.test/mcp',
+    });
+    await assert.rejects(() => provider.verifyAccessToken('acc'), InvalidTokenError);
     db.close();
   });
 });
@@ -168,6 +194,64 @@ describe('exchangeAuthorizationCode — маппинг ошибок (400 invalid
     await assert.rejects(() => provider.challengeForAuthorizationCode(CLIENT, 'nope'), InvalidGrantError);
     db.close();
   });
+
+  it('принимает опущенный redirect_uri и сохраняет canonical resource без прикладных scopes', async () => {
+    const { provider, db } = newProvider(true);
+    const codes = (provider as unknown as {
+      codes: Map<string, {
+        codeChallenge: string;
+        discordUserId: string;
+        clientId: string;
+        redirectUri: string;
+        expiresAt: number;
+      }>;
+    }).codes;
+    codes.set('code', {
+      codeChallenge: 'challenge',
+      discordUserId: 'u1',
+      clientId: 'c1',
+      redirectUri: 'https://client.test/cb',
+      expiresAt: future(),
+    });
+
+    const tokens = await provider.exchangeAuthorizationCode(
+      CLIENT,
+      'code',
+      undefined,
+      undefined,
+      RESOURCE,
+    );
+    const stored = store.getToken(db, tokens.access_token);
+    assert.equal(stored?.resource, RESOURCE.href);
+    assert.deepEqual(stored?.scopes, []);
+    db.close();
+  });
+
+  it('отклоняет несовпадающий redirect_uri, если он передан при обмене', async () => {
+    const { provider, db } = newProvider(true);
+    const codes = (provider as unknown as {
+      codes: Map<string, {
+        codeChallenge: string;
+        discordUserId: string;
+        clientId: string;
+        redirectUri: string;
+        expiresAt: number;
+      }>;
+    }).codes;
+    codes.set('code', {
+      codeChallenge: 'challenge',
+      discordUserId: 'u1',
+      clientId: 'c1',
+      redirectUri: 'https://client.test/cb',
+      expiresAt: future(),
+    });
+
+    await assert.rejects(
+      () => provider.exchangeAuthorizationCode(CLIENT, 'code', undefined, 'https://evil.test/cb', RESOURCE),
+      InvalidGrantError,
+    );
+    db.close();
+  });
 });
 
 describe('callback errors → OAuth error-redirect в клиент (RFC 6749 §4.1.2.1)', () => {
@@ -175,7 +259,10 @@ describe('callback errors → OAuth error-redirect в клиент (RFC 6749 §4
   async function mintPending(provider: DiscordFederatedProvider, clientState = 'client-state-123') {
     let authUrl = '';
     const res = { redirect: (u: string) => { authUrl = u; } } as unknown as Response;
-    const params = { codeChallenge: 'x', redirectUri: 'https://client.test/cb', state: clientState } as AuthorizationParams;
+    const params = {
+      codeChallenge: 'x', redirectUri: 'https://client.test/cb', state: clientState,
+      resource: RESOURCE,
+    } as AuthorizationParams;
     await provider.authorize(CLIENT, params, res);
     return new URL(authUrl).searchParams.get('state') as string;
   }
@@ -225,7 +312,10 @@ describe('in-memory лимиты и чистка', () => {
         states.push(new URL(u).searchParams.get('state') as string);
       },
     } as unknown as Response;
-    const params = { codeChallenge: 'x', redirectUri: 'https://client.test/cb', state: 'cs' } as AuthorizationParams;
+    const params = {
+      codeChallenge: 'x', redirectUri: 'https://client.test/cb', state: 'cs',
+      resource: RESOURCE,
+    } as AuthorizationParams;
     for (let i = 0; i < 1001; i++) {
       await provider.authorize(CLIENT, params, res); // MAX_PENDING=1000 → 1001-й вытесняет первый
     }
@@ -235,8 +325,8 @@ describe('in-memory лимиты и чистка', () => {
 
   it('pruneExpired чистит протухшие токены/refresh из БД, живые оставляет', () => {
     const { provider, db } = newProvider(true);
-    store.saveToken(db, 'expired', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: past() });
-    store.saveToken(db, 'live', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: future() });
+    store.saveToken(db, 'expired', { discordUserId: 'u1', clientId: 'c1', expiresAt: past(), ...validToken });
+    store.saveToken(db, 'live', { discordUserId: 'u1', clientId: 'c1', expiresAt: future(), ...validToken });
     store.saveRefresh(db, 'expired-ref', { discordUserId: 'u1', clientId: 'c1', scopes: [], expiresAt: past() });
     provider.pruneExpired();
     assert.equal(store.getToken(db, 'expired'), undefined);

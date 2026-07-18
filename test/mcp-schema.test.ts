@@ -19,10 +19,29 @@ describe('MCP contract', () => {
       const tools = (await client.listTools()).tools;
       assert.equal(tools.length, 10);
       const byName = new Map(tools.map((tool) => [tool.name, tool]));
+      const titles: Record<string, string> = {
+        search_messages: 'Search messages',
+        get_messages: 'Read messages',
+        get_message: 'Read message',
+        get_attachment: 'Read attachment',
+        get_channel: 'Read channel',
+        list_threads: 'List threads',
+        get_pinned: 'List pinned messages',
+        list_channels: 'List channels',
+        get_member: 'Read member',
+        search_members: 'Search members',
+      };
       for (const tool of tools) {
+        assert.equal(tool.title, titles[tool.name], `${tool.name} has no human-readable title`);
         assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} input is not closed`);
         assert.ok(tool.outputSchema, `${tool.name} has no output schema`);
         assert.equal(tool.outputSchema.additionalProperties, false, `${tool.name} output is not closed`);
+        assert.deepEqual(tool.annotations, {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        }, `${tool.name} is not marked as a read-only external-data tool`);
       }
 
       const listChannels = tools.find((tool) => tool.name === 'list_channels');

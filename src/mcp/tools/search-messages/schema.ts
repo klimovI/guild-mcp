@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { SearchResult } from '../../../discord/search.js';
 import { searchHitSchema } from '../../entities/message.js';
+import { READ_ONLY_TOOL_ANNOTATIONS } from '../annotations.js';
 
 export const DEFAULT_LIMIT = 25;
 export const MAX_LIMIT = 25;
@@ -22,9 +23,11 @@ export const inputSchema = z.object({
 }).strict();
 export const outputSchema = z.object({ messages: z.array(searchHitSchema) }).strict();
 export const definition = {
+  title: 'Search messages',
   description: 'Search Discord\'s message index. Returns compact hits; use get_message for full data. Recent messages may not be indexed yet.',
   inputSchema,
   outputSchema,
+  annotations: READ_ONLY_TOOL_ANNOTATIONS,
 };
 export type Input = z.input<typeof inputSchema>;
 export type Output = z.output<typeof outputSchema>;

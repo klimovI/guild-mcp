@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { Attachment, Message } from 'discord.js';
-import { findAttachment } from '../src/mcp/tools/get-attachment/index.js';
+import type { Attachment, Client, Message } from 'discord.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { findAttachment, registerGetAttachment } from '../src/mcp/tools/get-attachment/index.js';
+import { MAX_BYTES } from '../src/mcp/tools/get-attachment/schema.js';
+import type { ToolDeps } from '../src/mcp/server.js';
+import { perms, READ_HISTORY, VIEW } from './helpers.js';
 
 // Гейт доступа к каналу — на уровне fetchMessage (messages.test.ts); здесь только поиск вложения.
 
@@ -33,5 +38,69 @@ describe('findAttachment — верхний уровень + форварды', 
 
   it('неизвестный attachmentId → undefined (даёт not found)', () => {
     assert.equal(findAttachment(fakeMessage([att('a1')], [[att('f1')]]), 'nope'), undefined);
+  });
+});
+
+describe('get_attachment inline limit', () => {
+  it('не инлайнит ответ CDN, фактический размер которого превышает MAX_BYTES', async () => {
+    const attachment = {
+      id: 'a1',
+      name: 'image.png',
+      url: 'https://cdn.test/image.png',
+      contentType: 'image/png',
+      size: 1024,
+    } as Attachment;
+    const message = {
+      inGuild: () => true,
+      attachments: new Map([[attachment.id, attachment]]),
+      messageSnapshots: new Map(),
+    } as unknown as Message<true>;
+    const channel = {
+      id: 'c1',
+      isTextBased: () => true,
+      isDMBased: () => false,
+      permissionsFor: () => perms(VIEW, READ_HISTORY),
+      guild: { members: { fetch: async () => ({ id: 'u1' }) } },
+      messages: { fetch: async () => message },
+    };
+    const discord = {
+      channels: {
+        cache: new Map([['c1', channel]]),
+        fetch: async () => channel,
+      },
+    } as unknown as Client;
+
+    let handler: ((args: Record<string, string>, extra: unknown) => Promise<CallToolResult>) | undefined;
+    const server = {
+      registerTool: (_name: string, _definition: unknown, callback: typeof handler) => {
+        handler = callback;
+      },
+    } as unknown as McpServer;
+    registerGetAttachment(server, { discord } as ToolDeps);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      ok: true,
+      arrayBuffer: async () => new ArrayBuffer(MAX_BYTES + 1),
+    }) as Response;
+    try {
+      assert.ok(handler);
+      const result = await handler(
+        { channelId: 'c1', messageId: 'm1', attachmentId: 'a1' },
+        { authInfo: { extra: { discordUserId: 'u1' } } },
+      );
+      assert.deepEqual(result.content, []);
+      assert.deepEqual(result.structuredContent?.attachment, {
+        id: 'a1',
+        name: 'image.png',
+        contentType: 'image/png',
+        size: 1024,
+        delivery: 'metadata',
+        note: `actual download too large to inline (> ${MAX_BYTES} bytes)`,
+        url: 'https://cdn.test/image.png',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

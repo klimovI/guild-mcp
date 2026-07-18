@@ -4,6 +4,7 @@ import type { Application, Response } from 'express';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import {
   InvalidGrantError,
+  InvalidTargetError,
   InvalidTokenError,
   TemporarilyUnavailableError,
 } from '@modelcontextprotocol/sdk/server/auth/errors.js';
@@ -47,7 +48,6 @@ interface PendingAuth {
   codeChallenge: string;
   redirectUri: string; // redirect_uri клиента (валидируется SDK по зарегистрированным)
   clientState?: string;
-  resource?: string;
   expiresAt: number;
 }
 
@@ -55,7 +55,7 @@ interface AuthCode {
   codeChallenge: string;
   discordUserId: string;
   clientId: string;
-  resource?: string;
+  redirectUri: string;
   expiresAt: number;
 }
 
@@ -78,6 +78,16 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
     private readonly db: DB,
   ) {}
 
+  private get resource(): string {
+    return new URL('/mcp', this.config.PUBLIC_BASE_URL).href;
+  }
+
+  private requireResource(resource: URL | undefined): void {
+    if (!resource || resource.href !== this.resource) {
+      throw new InvalidTargetError(`resource must be ${this.resource}`);
+    }
+  }
+
   get clientsStore(): OAuthRegisteredClientsStore {
     return {
       getClient: (id) => store.getClient(this.db, id),
@@ -92,6 +102,7 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
 
   // Начало флоу: запоминаем PKCE-challenge клиента и редиректим пользователя на согласие Discord.
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
+    this.requireResource(params.resource);
     const state = randomUUID();
     evictOldest(this.pending, MAX_PENDING);
     this.pending.set(state, {
@@ -99,7 +110,6 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
       codeChallenge: params.codeChallenge,
       redirectUri: params.redirectUri,
       clientState: params.state,
-      resource: params.resource?.href,
       expiresAt: Date.now() + PENDING_TTL_MS,
     });
     res.redirect(buildAuthorizeUrl(this.config, state));
@@ -140,7 +150,7 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
       codeChallenge: pend.codeChallenge,
       discordUserId,
       clientId: pend.clientId,
-      resource: pend.resource,
+      redirectUri: pend.redirectUri,
       expiresAt: Date.now() + CODE_TTL_MS,
     });
 
@@ -159,26 +169,46 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
     return errorRedirect(pend, error, description);
   }
 
-  // SDK локально валидирует PKCE: S256(code_verifier) должен совпасть с этим challenge.
-  async challengeForAuthorizationCode(_client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
+  private getAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string): AuthCode {
     // InvalidGrantError → SDK отдаёт 400 invalid_grant; голый Error → 500 (клиент не переавторизуется).
     const c = this.codes.get(authorizationCode);
-    if (!c) throw new InvalidGrantError('invalid authorization code');
-    return c.codeChallenge;
+    if (!c || c.clientId !== client.client_id) throw new InvalidGrantError('invalid authorization code');
+    if (c.expiresAt < Date.now()) {
+      this.codes.delete(authorizationCode);
+      throw new InvalidGrantError('authorization code expired');
+    }
+    return c;
   }
 
-  async exchangeAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string): Promise<OAuthTokens> {
-    const c = this.codes.get(authorizationCode);
-    if (!c || c.clientId !== client.client_id) throw new InvalidGrantError('invalid authorization code');
+  // SDK локально валидирует PKCE: S256(code_verifier) должен совпасть с этим challenge.
+  async challengeForAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
+    return this.getAuthorizationCode(client, authorizationCode).codeChallenge;
+  }
+
+  async exchangeAuthorizationCode(
+    client: OAuthClientInformationFull,
+    authorizationCode: string,
+    _codeVerifier?: string,
+    redirectUri?: string,
+    resource?: URL,
+  ): Promise<OAuthTokens> {
+    const c = this.getAuthorizationCode(client, authorizationCode);
+    // SDK валидирует redirect_uri на /authorize и допускает его отсутствие на обоих запросах.
+    // Если клиент повторил параметр на /token, проверяем его согласованность с исходным запросом.
+    if (redirectUri !== undefined && redirectUri !== c.redirectUri) {
+      throw new InvalidGrantError('redirect_uri does not match authorization request');
+    }
+    // PKCE валидирует SDK; здесь остаётся provider-specific audience binding.
+    this.requireResource(resource);
     this.codes.delete(authorizationCode);
-    if (c.expiresAt < Date.now()) throw new InvalidGrantError('authorization code expired');
-    return this.issueTokens(c.discordUserId, client.client_id, [], c.resource);
+    return this.issueTokens(c.discordUserId, client.client_id);
   }
 
   async exchangeRefreshToken(
     client: OAuthClientInformationFull,
     refreshToken: string,
-    scopes?: string[],
+    _scopes?: string[],
+    resource?: URL,
   ): Promise<OAuthTokens> {
     // InvalidGrantError → SDK отдаёт 400 invalid_grant (клиент переавторизуется);
     // обычный Error SDK мапит в 500 (клиент не перелогинится).
@@ -188,6 +218,7 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
       store.deleteRefresh(this.db, refreshToken);
       throw new InvalidGrantError('refresh token expired');
     }
+    this.requireResource(resource);
     // Членство перепроверяется и на refresh: вышедший из всех гильдий не должен получать свежий
     // access. Проверяем ДО любой мутации строки — на not_member/unavailable ротацию не начинаем.
     const status = await checkMembershipStatus(this.discord, r.discordUserId);
@@ -205,7 +236,7 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
     if (!store.deleteRefresh(this.db, refreshToken)) {
       throw new InvalidGrantError('invalid refresh token');
     }
-    return this.issueTokens(r.discordUserId, client.client_id, scopes ?? r.scopes);
+    return this.issueTokens(r.discordUserId, client.client_id);
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -216,6 +247,9 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
     if (t.expiresAt < Date.now()) {
       store.deleteToken(this.db, token);
       throw new InvalidTokenError('token expired');
+    }
+    if (t.resource !== this.resource) {
+      throw new InvalidTokenError('token was not issued for this MCP resource');
     }
     // Членство перепроверяется на каждый запрос: вышел/исключён из всех гильдий бота
     // → немедленно разлогиниваем (отзываем все его токены) → 401 → переавторизация.
@@ -233,7 +267,7 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
       clientId: t.clientId,
       scopes: t.scopes,
       expiresAt: Math.floor(t.expiresAt / 1000),
-      resource: t.resource ? new URL(t.resource) : undefined,
+      resource: new URL(t.resource),
       extra: { discordUserId: t.discordUserId },
     };
   }
@@ -243,20 +277,20 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
     store.deleteRefresh(this.db, request.token);
   }
 
-  private issueTokens(discordUserId: string, clientId: string, scopes: string[], resource?: string): OAuthTokens {
+  private issueTokens(discordUserId: string, clientId: string): OAuthTokens {
     const access = randomBytes(32).toString('base64url');
     const refreshTok = randomBytes(32).toString('base64url');
     store.saveToken(this.db, access, {
       discordUserId,
       clientId,
-      scopes,
+      scopes: [],
       expiresAt: Date.now() + TOKEN_TTL_S * 1000,
-      resource,
+      resource: this.resource,
     });
     store.saveRefresh(this.db, refreshTok, {
       discordUserId,
       clientId,
-      scopes,
+      scopes: [],
       expiresAt: Date.now() + REFRESH_TTL_MS,
     });
     return {
@@ -264,7 +298,6 @@ export class DiscordFederatedProvider implements OAuthServerProvider {
       token_type: 'Bearer',
       expires_in: TOKEN_TTL_S,
       refresh_token: refreshTok,
-      scope: scopes.length > 0 ? scopes.join(' ') : undefined,
     };
   }
 
@@ -287,7 +320,6 @@ export function mountAuth(app: Application, config: Config, provider: DiscordFed
     mcpAuthRouter({
       provider,
       issuerUrl,
-      scopesSupported: ['identify'],
       resourceName: 'guild-mcp',
       resourceServerUrl,
     }),

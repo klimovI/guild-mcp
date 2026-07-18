@@ -22,9 +22,13 @@ export const MANAGE_THREADS = PermissionFlagsBits.ManageThreads;
 export function config(): Config {
   return {
     DISCORD_CLIENT_ID: 'discord-client',
+    DISCORD_CLIENT_SECRET: 'discord-secret',
     OAUTH_REDIRECT_URI: 'https://example.test/oauth/discord/callback',
+    PUBLIC_BASE_URL: 'https://example.test',
+    DISCORD_BOT_TOKEN: 'discord-bot-token',
+    PORT: 3000,
     DB_PATH: ':memory:',
-  } as Config;
+  };
 }
 
 export function member(id = 'u1'): GuildMember {

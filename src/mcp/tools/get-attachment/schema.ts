@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { attachmentSchema } from '../../entities/attachment.js';
+import { READ_ONLY_TOOL_ANNOTATIONS } from '../annotations.js';
 
 export const MAX_BYTES = 10 * 1024 * 1024;
 export const inputSchema = z.object({
@@ -9,9 +10,11 @@ export const inputSchema = z.object({
 }).strict();
 export const outputSchema = z.object({ attachment: attachmentSchema }).strict();
 export const definition = {
+  title: 'Read attachment',
   description: `Read an attachment. Images and text are returned inline; binary files and files over ${MAX_BYTES / (1024 * 1024)}MB return metadata.`,
   inputSchema,
   outputSchema,
+  annotations: READ_ONLY_TOOL_ANNOTATIONS,
 };
 export type Input = z.input<typeof inputSchema>;
 export type Output = z.output<typeof outputSchema>;

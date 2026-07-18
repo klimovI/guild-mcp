@@ -6,6 +6,14 @@ import type { Config } from '../config.js';
 import { DiscordFederatedProvider, mountAuth } from '../auth/oauth.js';
 import { createMcpServer, type ToolDeps } from '../mcp/server.js';
 
+export function isTrustedMcpOrigin(origin: string | undefined, publicBaseUrl: string): boolean {
+  return origin === undefined || origin === new URL(publicBaseUrl).origin;
+}
+
+export const mcpGetNotAllowed: RequestHandler = (_req, res) => {
+  res.set('Allow', 'POST').status(405).send('Method Not Allowed');
+};
+
 // HTTP-слой на express: OAuth-слой SDK (mcpAuthRouter/requireBearerAuth) express-нативен.
 export function createHttpServer(config: Config, deps: ToolDeps): Application {
   const app = express();
@@ -18,6 +26,15 @@ export function createHttpServer(config: Config, deps: ToolDeps): Application {
     verifier: provider,
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(new URL('/mcp', config.PUBLIC_BASE_URL)),
   });
+
+  const requireTrustedOrigin: RequestHandler = (req, res, next) => {
+    const origin = req.headers.origin;
+    if (!isTrustedMcpOrigin(origin, config.PUBLIC_BASE_URL)) {
+      res.status(403).json({ error: 'untrusted_origin', error_description: 'Origin is not allowed.' });
+      return;
+    }
+    next();
+  };
 
   // Fail-closed на неготовый/потерявший сессию Discord-клиент. Стоит ПЕРЕД bearer: verifyAccessToken
   // тоже бьёт Discord (гейт членства) — без готового клиента он не должен исполняться вовсе.
@@ -36,7 +53,9 @@ export function createHttpServer(config: Config, deps: ToolDeps): Application {
 
   // MCP Streamable HTTP на /mcp, за bearer. Stateless: сервер+транспорт на запрос;
   // проверенная identity из req.auth пробрасывается транспортом в extra.authInfo тулов.
-  app.post('/mcp', requireDiscordReady, bearer, express.json(), async (req, res) => {
+  app.get('/mcp', requireTrustedOrigin, bearer, mcpGetNotAllowed);
+
+  app.post('/mcp', requireTrustedOrigin, requireDiscordReady, bearer, express.json(), async (req, res) => {
     const server = createMcpServer(deps);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => {
